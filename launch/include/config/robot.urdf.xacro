@@ -2,34 +2,51 @@
 <robot name="lio" xmlns:xacro="http://tixiaoshan.github.io/">
   <xacro:property name="PI" value="3.1415926535897931" />
 
-  <link name="chassis_link"></link>
+   
+  <link name="base_link" />
+  <link name="csi_optical_frame" />
+  <link name="camera_pose_frame" />
+  <link name="d400_link" />
+  <link name="gopro_link" />
+  <link name="livox_link" />
+  <link name="livox_frame" />
 
-  <link name="base_link"></link>
-  <joint name="base_link_joint" type="fixed">
+    <joint name="t265_joint_link" type="fixed">
     <parent link="base_link"/>
-    <child link="chassis_link" />
-    <origin xyz="0 0 0" rpy="0 0 0" />
+    <child link="camera_pose_frame"/>
+    <origin xyz="0.065 0.00 -0.114" rpy="0.0 1.5708 0.0"/> 
   </joint>
 
-  <link name="imu_link"> </link>
-  <joint name="imu_joint" type="fixed">
-    <parent link="chassis_link" />
-    <child link="imu_link" />
-    <origin xyz="0 0 0" rpy="0 0 0" />
+    <joint name="csi_joint_link" type="fixed">
+    <parent link="base_link"/>
+    <child link="csi_optical_frame"/>
+    <origin xyz="0.04365 0.00 -0.214" rpy="0 -3.14 1.57"/> 
   </joint>
 
-  <link name="velodyne"> </link>
-  <joint name="velodyne_joint" type="fixed">
-    <parent link="chassis_link" />
-    <child link="velodyne" />
-    <origin xyz="0 0 0" rpy="0 0 0" />
+ <joint name="d400_joint_link" type="fixed">
+    <parent link="base_link"/>
+    <child link="d400_link"/>
+    <origin xyz="0.085 0.0 -0.122" rpy="0.0 0.0 0.0"/> 
   </joint>
 
-  <link name="navsat_link"> </link>
-  <joint name="navsat_joint" type="fixed">
-    <parent link="chassis_link" />
-    <child link="navsat_link" />
-    <origin xyz="0 0 0" rpy="0 0 0" />
+ <joint name="gopro_joint_link" type="fixed">
+    <parent link="base_link"/>
+    <child link="gopro_link"/>
+    <origin xyz="0.02 0.0 -0.15" rpy="0.0 -3.14 3.14"/> 
   </joint>
+
+
+ <joint name="livox_mount_joint_link" type="fixed">
+    <parent link="base_link"/>
+    <child link="livox_link"/>
+    <origin xyz="0.0 0.0 -0.21807" rpy="0.0 1.570796 0.0"/> 
+  </joint>
+
+ <joint name="livox_joint_link" type="fixed">
+    <parent link="livox_link"/>
+    <child link="livox_frame"/>
+    <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0"/> 
+  </joint>
+
 
 </robot>
