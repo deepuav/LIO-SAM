@@ -1,4 +1,4 @@
-# LIO-SAM
+# LIO-SAM (Noetic Support)
 
 **A real-time lidar-inertial odometry package. We strongly recommend the users read this document thoroughly and test the package with the provided dataset first. A video of the demonstration of the method can be found on [YouTube](https://www.youtube.com/watch?v=A0H8CoORZJU).**
 
@@ -57,14 +57,19 @@ This is the original ROS1 implementation of LIO-SAM. For a ROS2 implementation s
 
 - [ROS](http://wiki.ros.org/ROS/Installation) (tested with Kinetic and Melodic. Refer to [#206](https://github.com/TixiaoShan/LIO-SAM/issues/206) for Noetic)
   ```
-  sudo apt-get install -y ros-kinetic-navigation
-  sudo apt-get install -y ros-kinetic-robot-localization
-  sudo apt-get install -y ros-kinetic-robot-state-publisher
+	sudo apt-get install -y ros-noetic-navigation
+	sudo apt-get install -y ros-noetic-robot-localization
+	sudo apt-get install -y ros-noetic-robot-state-publisher
   ```
 - [gtsam](https://gtsam.org/get_started/) (Georgia Tech Smoothing and Mapping library)
   ```
-  sudo add-apt-repository ppa:borglab/gtsam-release-4.0
-  sudo apt install libgtsam-dev libgtsam-unstable-dev
+	wget -O ~/Downloads/gtsam.zip https://github.com/borglab/gtsam/archive/4.0.3.zip
+	cd ~/Downloads/ && unzip gtsam.zip -d ~/Downloads/
+	cd ~/Downloads/gtsam-4.0.3/
+	mkdir build && cd build
+	cmake -DGTSAM_BUILD_WITH_MARCH_NATIVE=OFF ..
+	sudo make install -j8
+
   ```
 
 ## Install
