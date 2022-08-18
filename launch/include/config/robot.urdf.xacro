@@ -4,36 +4,26 @@
 
    
   <link name="base_link" />
-  <link name="csi_optical_frame" />
-  <link name="camera_pose_frame" />
-  <link name="d400_link" />
-  <link name="gopro_link" />
   <link name="livox_link" />
   <link name="livox_frame" />
+  <link name="velodyne" />
+  <link name="imu_link" />
 
-    <joint name="t265_joint_link" type="fixed">
+
+ <joint name="vlp_joint_link" type="fixed">
     <parent link="base_link"/>
-    <child link="camera_pose_frame"/>
-    <origin xyz="0.065 0.00 -0.114" rpy="0.0 1.5708 0.0"/> 
+    <child link="velodyne"/>
+    <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0"/>
   </joint>
 
-    <joint name="csi_joint_link" type="fixed">
+ <joint name="imu_joint_link" type="fixed">
     <parent link="base_link"/>
-    <child link="csi_optical_frame"/>
-    <origin xyz="0.04365 0.00 -0.214" rpy="0 -3.14 1.57"/> 
+    <child link="imu_link"/>
+    <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0"/>
   </joint>
 
- <joint name="d400_joint_link" type="fixed">
-    <parent link="base_link"/>
-    <child link="d400_link"/>
-    <origin xyz="0.085 0.0 -0.122" rpy="0.0 0.0 0.0"/> 
-  </joint>
 
- <joint name="gopro_joint_link" type="fixed">
-    <parent link="base_link"/>
-    <child link="gopro_link"/>
-    <origin xyz="0.02 0.0 -0.15" rpy="0.0 -3.14 3.14"/> 
-  </joint>
+
 
 
  <joint name="livox_mount_joint_link" type="fixed">
