@@ -58,40 +58,6 @@ lidar_rpy = []
 #     print("origin epsg:32639", x0, y0, z0)
 
 #     pub_fix.publish(navset_msg)
-
-# def imu_px_clb(data):
-#     global x, y, z, br, quat_lidar, px4_rpy
-    
-#     px4_rpy = tf.transformations.euler_from_quaternion((data.orientation.x, data.orientation.y, data.orientation.z, data.orientation.w))
-
-#     print("px4_rpy:", np.degrees(px4_rpy))
-
-#     br.sendTransform((x, y, z),
-#                          (data.orientation.x, data.orientation.y, data.orientation.z, data.orientation.w),     
-#                          data.header.stamp,
-#                          "base_link",
-#                           "map")
-
-#     br.sendTransform((-0.02035, 0, -0.19),
-#                         (0.,0.,0.,1.),
-#                          data.header.stamp,
-#                          "livox_link",
-#                          "base_link")
-
-#     br.sendTransform((0.0, 0, 0.0469),
-#                     quat_lidar,
-#                         data.header.stamp,
-#                         "livox_frame",
-#                         "livox_link")
-
-# def imu_lidar_clb(data):
-#     global x, y, z, br, quat_lidar, px4_rpy, lidar_rpy
-    
-#     lidar_rpy = tf.transformations.euler_from_quaternion((data.orientation.x, data.orientation.y, data.orientation.z, data.orientation.w))
-#     print("px4_rpy:", np.degrees(px4_rpy))
-#     print("lidar_rpy:", np.degrees(lidar_rpy))
-#     diff = [lidar_rpy[0]-px4_rpy[0],lidar_rpy[1]-px4_rpy[1],lidar_rpy[2]-px4_rpy[2]]
-#     print("diff:",  np.degrees(diff))
     
 
 def navsat_clb(data):
