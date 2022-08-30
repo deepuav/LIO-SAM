@@ -16,19 +16,6 @@ from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Point
 
 
-# origin point
-longitude = 55.747349899999996
-latitude = 48.743282699999995
-z0 = 217
-
-
-inProj = pyproj.Proj(init='epsg:4326')
-outProj = pyproj.Proj(init='epsg:32639')
-
-x0, y0 = pyproj.transform(inProj, outProj, latitude, longitude)
-
-print(x0, y0, z0)
-
 x, y, z = 0, 0, 0
 
 local_pose = Point()
@@ -36,9 +23,6 @@ navset_msg = NavSatFix()
 global_pose = NavSatFix()
 odom_msg = Odometry()
 
-quat_lidar = tf.transformations.quaternion_from_euler(0, math.radians(93), 0)
-px4_rpy = []
-lidar_rpy = []
 
 # def gpsraw_clb(data):
 #     global navset_msg, pub_fix, x, y, z
@@ -82,15 +66,30 @@ def navsat_clb(data):
     
     print("origin WGS84", latitude, longitude, z0)
     print("origin epsg:32639", x0, y0, z0)
+    print("odom pose:", odom_msg.pose.pose.position)
+    
     pub_odom.publish(odom_msg)
  
 if __name__ == '__main__':
 
     rospy.init_node("gpsraw2navsat_node", anonymous=True)
-    br = tf.TransformBroadcaster()
-    
+
+    # origin point
+    latitude = 55.551872
+    longitude = 49.076458
+    z0 = 109
+
+
+    inProj = pyproj.Proj(init='epsg:4326')
+    outProj = pyproj.Proj(init='epsg:32639')
+
+    x0, y0 = pyproj.transform(inProj, outProj, longitude, latitude)
+
+    print(x0, y0, z0)
+
+
     # rospy.Subscriber("/mavros/gpsstatus/gps2/raw", GPSRAW, gpsraw_clb)
-    rospy.Subscriber("/gnss", NavSatFix, navsat_clb)
+    rospy.Subscriber("/fix", NavSatFix, navsat_clb)
     
 
     pub_odom = rospy.Publisher("/odometry/gps", Odometry, queue_size=10)
