@@ -1,5 +1,13 @@
 #include "utility.h"
 #include "lio_sam/cloud_info.h"
+#include "tic_toc.h"
+#include "write_log.h"
+
+FILE *fp_time_calculateSmoothness;
+FILE *fp_time_markOccludedPoints;
+FILE *fp_time_extractFeatures;
+FILE *fp_size_edge;
+FILE *fp_size_surf;
 
 struct smoothness_t{ 
     float value;
@@ -37,6 +45,12 @@ public:
     int *cloudNeighborPicked;
     int *cloudLabel;
 
+    std::string time_calculateSmoothness_path;
+    std::string time_markOccludedPoints_path;
+    std::string time_extractFeatures_path;
+    std::string size_edge_path;
+    std::string size_surf_path;
+
     FeatureExtraction()
     {
         subLaserCloudInfo = nh.subscribe<lio_sam::cloud_info>("lio_sam/deskew/cloud_info", 1, &FeatureExtraction::laserCloudInfoHandler, this, ros::TransportHints().tcpNoDelay());
@@ -44,7 +58,23 @@ public:
         pubLaserCloudInfo = nh.advertise<lio_sam::cloud_info> ("lio_sam/feature/cloud_info", 1);
         pubCornerPoints = nh.advertise<sensor_msgs::PointCloud2>("lio_sam/feature/cloud_corner", 1);
         pubSurfacePoints = nh.advertise<sensor_msgs::PointCloud2>("lio_sam/feature/cloud_surface", 1);
-        
+
+        nh.param<std::string>("lio_sam/time_calculateSmoothness_path", time_calculateSmoothness_path, "/home/wyb/Documents/experimental_results/lio_sam/time/featureExtraction/t_calculateSmoothness.txt");
+        nh.param<std::string>("lio_sam/time_markOccludedPoints_path", time_markOccludedPoints_path, "/home/wyb/Documents/experimental_results/lio_sam/time/featureExtraction/t_markOccludedPoints.txt");
+        nh.param<std::string>("lio_sam/time_extractFeatures_path", time_extractFeatures_path, "/home/wyb/Documents/experimental_results/lio_sam/time/featureExtraction/t_extractFeatures.txt");
+        nh.param<std::string>("lio_sam/size_edge_path", size_edge_path, "/home/wyb/Documents/experimental_results/lio_sam/size/size_edge.txt");
+        nh.param<std::string>("lio_sam/size_surf_path", size_surf_path, "/home/wyb/Documents/experimental_results/lio_sam/size/size_surf.txt");
+
+        if (write_time_log){
+            fp_time_calculateSmoothness = fopen(time_calculateSmoothness_path.c_str(), "w");
+            fp_time_markOccludedPoints = fopen(time_markOccludedPoints_path.c_str(), "w");
+            fp_time_extractFeatures = fopen(time_extractFeatures_path.c_str(), "w");
+        }
+        if (write_size_log){
+            fp_size_edge = fopen(size_edge_path.c_str(), "w");
+            fp_size_surf = fopen(size_surf_path.c_str(), "w");
+        }
+
         initializationValue();
     }
 
@@ -69,11 +99,23 @@ public:
         cloudHeader = msgIn->header; // new cloud header
         pcl::fromROSMsg(msgIn->cloud_deskewed, *extractedCloud); // new cloud for extraction
 
+        TicToc t_calculateSmoothness;
         calculateSmoothness();
+        if (write_time_log){
+            time_log(fp_time_calculateSmoothness, t_calculateSmoothness.toc());
+        }
 
+        TicToc t_markOccludedPoints;
         markOccludedPoints();
+        if (write_time_log){
+            time_log(fp_time_markOccludedPoints, t_markOccludedPoints.toc());
+        }
 
+        TicToc t_extractFeatures;
         extractFeatures();
+        if (write_time_log){
+            time_log(fp_time_extractFeatures, t_extractFeatures.toc());
+        }
 
         publishFeatureCloud();
     }
@@ -150,11 +192,11 @@ public:
         {
             surfaceCloudScan->clear();
 
-            for (int j = 0; j < 6; j++)
+            for (int j = 0; j < subscanNum; j++) // default: 6
             {
 
-                int sp = (cloudInfo.startRingIndex[i] * (6 - j) + cloudInfo.endRingIndex[i] * j) / 6;
-                int ep = (cloudInfo.startRingIndex[i] * (5 - j) + cloudInfo.endRingIndex[i] * (j + 1)) / 6 - 1;
+                int sp = (cloudInfo.startRingIndex[i] * (6 - j) + cloudInfo.endRingIndex[i] * j) / subscanNum; // default: 6
+                int ep = (cloudInfo.startRingIndex[i] * (5 - j) + cloudInfo.endRingIndex[i] * (j + 1)) / subscanNum - 1; // default: 6
 
                 if (sp >= ep)
                     continue;
@@ -168,7 +210,7 @@ public:
                     if (cloudNeighborPicked[ind] == 0 && cloudCurvature[ind] > edgeThreshold)
                     {
                         largestPickedNum++;
-                        if (largestPickedNum <= 20){
+                        if (largestPickedNum <= largestEdgeNum){ // default: 20
                             cloudLabel[ind] = 1;
                             cornerCloud->push_back(extractedCloud->points[ind]);
                         } else {
@@ -235,6 +277,12 @@ public:
 
             *surfaceCloud += *surfaceCloudScanDS;
         }
+        if (write_size_log){
+            size_log(fp_size_edge, cornerCloud->size());
+            size_log(fp_size_surf, surfaceCloud->size());
+        }
+//        std::cout << "edge points: " << cornerCloud->size() << std::endl;
+//        std::cout << "surf points: " << surfaceCloud->size() << std::endl;
     }
 
     void freeCloudInfoMemory()

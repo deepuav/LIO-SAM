@@ -58,7 +58,7 @@ using namespace std;
 
 typedef pcl::PointXYZI PointType;
 
-enum class SensorType { VELODYNE, OUSTER, LIVOX };
+enum class SensorType { VELODYNE, OUSTER, LIVOX, RSLIDARM1 };
 
 class ParamServer
 {
@@ -89,6 +89,8 @@ public:
     // Save pcd
     bool savePCD;
     string savePCDDirectory;
+    bool write_time_log = false;
+    bool write_size_log = false;
 
     // Lidar Sensor Configuration
     SensorType sensor;
@@ -97,8 +99,13 @@ public:
     int downsampleRate;
     float lidarMinRange;
     float lidarMaxRange;
+    int subscanNum;
+    int largestEdgeNum;
+    bool imuDeskewPoint = false;
+    bool imuInitialGuess = false;
 
     // IMU
+    float imuRate;
     float imuAccNoise;
     float imuGyrNoise;
     float imuAccBiasN;
@@ -172,6 +179,8 @@ public:
 
         nh.param<bool>("lio_sam/savePCD", savePCD, false);
         nh.param<std::string>("lio_sam/savePCDDirectory", savePCDDirectory, "/Downloads/LOAM/");
+        nh.param<bool>("lio_sam/write_time_log", write_time_log, false);
+        nh.param<bool>("lio_sam/write_size_log", write_size_log, false);
 
         std::string sensorStr;
         nh.param<std::string>("lio_sam/sensor", sensorStr, "");
@@ -187,6 +196,10 @@ public:
         {
             sensor = SensorType::LIVOX;
         }
+        else if (sensorStr == "rslidarm1")
+        {
+            sensor = SensorType::RSLIDARM1;
+        }
         else
         {
             ROS_ERROR_STREAM(
@@ -199,7 +212,12 @@ public:
         nh.param<int>("lio_sam/downsampleRate", downsampleRate, 1);
         nh.param<float>("lio_sam/lidarMinRange", lidarMinRange, 1.0);
         nh.param<float>("lio_sam/lidarMaxRange", lidarMaxRange, 1000.0);
+        nh.param<int>("lio_sam/subscanNum", subscanNum, 6);
+        nh.param<int>("lio_sam/largestEdgeNum", largestEdgeNum, 20);
+        nh.param<bool>("lio_sam/imuDeskewPoint", imuDeskewPoint, false);
+        nh.param<bool>("lio_sam/imuInitialGuess", imuInitialGuess, false);
 
+        nh.param<float>("lio_sam/imuRate", imuRate, 500.0);
         nh.param<float>("lio_sam/imuAccNoise", imuAccNoise, 0.01);
         nh.param<float>("lio_sam/imuGyrNoise", imuGyrNoise, 0.001);
         nh.param<float>("lio_sam/imuAccBiasN", imuAccBiasN, 0.0002);

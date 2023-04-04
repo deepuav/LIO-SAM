@@ -1,5 +1,16 @@
 #include "utility.h"
 #include "lio_sam/cloud_info.h"
+#include "tic_toc.h"
+#include "write_log.h"
+
+FILE *fp_time_imuHandler;
+FILE *fp_time_odometryHandler;
+FILE *fp_time_cachePointCloud;
+FILE *fp_time_imuDeskewInfo;
+FILE *fp_time_odomDeskewInfo;
+FILE *fp_time_projectPointCloud;
+FILE *fp_time_deskewPoint;
+FILE *fp_time_cloudExtraction;
 
 struct VelodynePointXYZIRT
 {
@@ -28,6 +39,19 @@ POINT_CLOUD_REGISTER_POINT_STRUCT(OusterPointXYZIRT,
     (float, x, x) (float, y, y) (float, z, z) (float, intensity, intensity)
     (uint32_t, t, t) (uint16_t, reflectivity, reflectivity)
     (uint8_t, ring, ring) (uint16_t, noise, noise) (uint32_t, range, range)
+)
+
+struct RslidarM1PointXYZIRT
+{
+    PCL_ADD_POINT4D
+    float intensity;
+    uint16_t ring;
+    double timestamp;
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+} EIGEN_ALIGN16;
+POINT_CLOUD_REGISTER_POINT_STRUCT(RslidarM1PointXYZIRT,
+                                  (float, x, x)(float, y, y)(float, z, z)(float, intensity, intensity)
+                                          (uint16_t, ring, ring)(double, timestamp, timestamp)
 )
 
 // Use the Velodyne point format as a common representation
@@ -68,6 +92,7 @@ private:
 
     pcl::PointCloud<PointXYZIRT>::Ptr laserCloudIn;
     pcl::PointCloud<OusterPointXYZIRT>::Ptr tmpOusterCloudIn;
+    pcl::PointCloud<RslidarM1PointXYZIRT>::Ptr tmpRslidarM1CloudIn;
     pcl::PointCloud<PointType>::Ptr   fullCloud;
     pcl::PointCloud<PointType>::Ptr   extractedCloud;
 
@@ -86,6 +111,15 @@ private:
 
     vector<int> columnIdnCountVec;
 
+    std::string time_imuHandler_path;
+    std::string time_odometryHandler_path;
+    std::string time_cachePointCloud_path;
+    std::string time_imuDeskewInfo_path;
+    std::string time_odomDeskewInfo_path;
+    std::string time_projectPointCloud_path;
+    std::string time_deskewPoint_path;
+    std::string time_cloudExtraction_path;
+
 
 public:
     ImageProjection():
@@ -98,6 +132,26 @@ public:
         pubExtractedCloud = nh.advertise<sensor_msgs::PointCloud2> ("lio_sam/deskew/cloud_deskewed", 1);
         pubLaserCloudInfo = nh.advertise<lio_sam::cloud_info> ("lio_sam/deskew/cloud_info", 1);
 
+        nh.param<std::string>("lio_sam/time_imuHandler_path", time_imuHandler_path, "/home/wyb/Documents/experimental_results/lio_sam/time/imageProjection/t_imuHandler.txt");
+        nh.param<std::string>("lio_sam/time_odometryHandler_path", time_odometryHandler_path, "/home/wyb/Documents/experimental_results/lio_sam/time/imageProjection/t_odometryHandler.txt");
+        nh.param<std::string>("lio_sam/time_cachePointCloud_path", time_cachePointCloud_path, "/home/wyb/Documents/experimental_results/lio_sam/time/imageProjection/t_cachePointCloud.txt");
+        nh.param<std::string>("lio_sam/time_imuDeskewInfo_path", time_imuDeskewInfo_path, "/home/wyb/Documents/experimental_results/lio_sam/time/imageProjection/t_imuDeskewInfo.txt");
+        nh.param<std::string>("lio_sam/time_odomDeskewInfo_path", time_odomDeskewInfo_path, "/home/wyb/Documents/experimental_results/lio_sam/time/imageProjection/t_odomDeskewInfo.txt");
+        nh.param<std::string>("lio_sam/time_projectPointCloud_path", time_projectPointCloud_path, "/home/wyb/Documents/experimental_results/lio_sam/time/imageProjection/t_projectPointCloud.txt");
+        nh.param<std::string>("lio_sam/time_deskewPoint_path", time_deskewPoint_path, "/home/wyb/Documents/experimental_results/lio_sam/time/imageProjection/t_deskewPoint.txt");
+        nh.param<std::string>("lio_sam/time_cloudExtraction_path", time_cloudExtraction_path, "/home/wyb/Documents/experimental_results/lio_sam/time/imageProjection/t_cloudExtraction.txt");
+
+        if (write_time_log){
+            fp_time_imuHandler = fopen(time_imuHandler_path.c_str(), "w");
+            fp_time_odometryHandler = fopen(time_odometryHandler_path.c_str(), "w");
+            fp_time_cachePointCloud = fopen(time_cachePointCloud_path.c_str(), "w");
+            fp_time_imuDeskewInfo = fopen(time_imuDeskewInfo_path.c_str(), "w");
+            fp_time_odomDeskewInfo = fopen(time_odomDeskewInfo_path.c_str(), "w");
+            fp_time_projectPointCloud = fopen(time_projectPointCloud_path.c_str(), "w");
+            fp_time_deskewPoint = fopen(time_deskewPoint_path.c_str(), "w");
+            fp_time_cloudExtraction = fopen(time_cloudExtraction_path.c_str(), "w");
+        }
+
         allocateMemory();
         resetParameters();
 
@@ -108,6 +162,7 @@ public:
     {
         laserCloudIn.reset(new pcl::PointCloud<PointXYZIRT>());
         tmpOusterCloudIn.reset(new pcl::PointCloud<OusterPointXYZIRT>());
+        tmpRslidarM1CloudIn.reset(new pcl::PointCloud<RslidarM1PointXYZIRT>);
         fullCloud.reset(new pcl::PointCloud<PointType>());
         extractedCloud.reset(new pcl::PointCloud<PointType>());
 
@@ -148,10 +203,15 @@ public:
 
     void imuHandler(const sensor_msgs::Imu::ConstPtr& imuMsg)
     {
+        TicToc t_imuHandler;
         sensor_msgs::Imu thisImu = imuConverter(*imuMsg);
 
         std::lock_guard<std::mutex> lock1(imuLock);
         imuQueue.push_back(thisImu);
+
+        if (write_time_log){
+            time_log(fp_time_imuHandler, t_imuHandler.toc());
+        }
 
         // debug IMU data
         // cout << std::setprecision(6);
@@ -173,8 +233,13 @@ public:
 
     void odometryHandler(const nav_msgs::Odometry::ConstPtr& odometryMsg)
     {
+        TicToc t_odometryHandler;
         std::lock_guard<std::mutex> lock2(odoLock);
         odomQueue.push_back(*odometryMsg);
+
+        if (write_time_log){
+            time_log(fp_time_odometryHandler, t_odometryHandler.toc());
+        }
     }
 
     void cloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
@@ -185,9 +250,17 @@ public:
         if (!deskewInfo())
             return;
 
+        TicToc t_projectPointCloud;
         projectPointCloud();
+        if (write_time_log){
+            time_log(fp_time_projectPointCloud, t_projectPointCloud.toc());
+        }
 
+        TicToc t_cloudExtraction;
         cloudExtraction();
+        if (write_time_log){
+            time_log(fp_time_cloudExtraction, t_cloudExtraction.toc());
+        }
 
         publishClouds();
 
@@ -196,6 +269,7 @@ public:
 
     bool cachePointCloud(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
     {
+        TicToc t_cachePointCloud;
         // cache point cloud
         cloudQueue.push_back(*laserCloudMsg);
         if (cloudQueue.size() <= 2)
@@ -225,6 +299,45 @@ public:
                 dst.ring = src.ring;
                 dst.time = src.t * 1e-9f;
             }
+        }
+        else if (sensor == SensorType::RSLIDARM1)
+        {
+            // Convert to Velodyne format
+            pcl::moveFromROSMsg(currentCloudMsg, *tmpRslidarM1CloudIn);
+//            laserCloudIn->points.resize(tmpRslidarM1CloudIn->size());
+            double first_point_timestamp = tmpRslidarM1CloudIn->at(0,0).timestamp;
+            std::vector<pcl::PointCloud<PointXYZIRT>> pointcloud_subcloud_channel(5);
+            for (size_t i_row = 0; i_row < tmpRslidarM1CloudIn->width; ++i_row)
+            {
+                for (size_t i_column = 0; i_column < tmpRslidarM1CloudIn->height; ++i_column)
+                {
+                    PointXYZIRT added_pt;
+                    added_pt.x = tmpRslidarM1CloudIn->at(i_row, i_column).x;
+                    added_pt.y = tmpRslidarM1CloudIn->at(i_row, i_column).y;
+                    added_pt.z = tmpRslidarM1CloudIn->at(i_row, i_column).z;
+                    added_pt.intensity = tmpRslidarM1CloudIn->at(i_row, i_column).intensity;
+                    added_pt.ring = i_row;//i_column % 5;
+                    added_pt.time = tmpRslidarM1CloudIn->at(i_row, i_column).timestamp - first_point_timestamp;
+                    pointcloud_subcloud_channel[i_row].push_back(added_pt);
+                }
+            }
+            for (int i_subcloud = 0; i_subcloud < N_SCAN; ++i_subcloud)
+            {
+                for (size_t i = 0; i < pointcloud_subcloud_channel[i_subcloud].size(); ++i)
+                {
+//                    auto &src = pointcloud_subcloud_channel[i_subcloud].points[i];
+//                    auto &dst = laserCloudIn->points[i + i_subcloud * Horizon_SCAN];
+//                    dst = src;
+                    float pt_x = pointcloud_subcloud_channel[i_subcloud].points[i].x;
+                    float pt_y = pointcloud_subcloud_channel[i_subcloud].points[i].y;
+                    float pt_z = pointcloud_subcloud_channel[i_subcloud].points[i].z;
+                    if (pt_x * pt_x + pt_y * pt_y + pt_z * pt_z < 200 * 200)
+                    {
+                        laserCloudIn->push_back(pointcloud_subcloud_channel[i_subcloud].points[i]);
+                    }
+                }
+            }
+//            std::cout << "check laserCloudIn size: " << laserCloudIn->size() << std::endl;
         }
         else
         {
@@ -270,7 +383,7 @@ public:
             deskewFlag = -1;
             for (auto &field : currentCloudMsg.fields)
             {
-                if (field.name == "time" || field.name == "t")
+                if (field.name == "time" || field.name == "t" || field.name == "timestamp")
                 {
                     deskewFlag = 1;
                     break;
@@ -278,6 +391,10 @@ public:
             }
             if (deskewFlag == -1)
                 ROS_WARN("Point cloud timestamp not available, deskew function disabled, system will drift significantly!");
+        }
+
+        if (write_time_log){
+            time_log(fp_time_cachePointCloud, t_cachePointCloud.toc());
         }
 
         return true;
@@ -295,9 +412,17 @@ public:
             return false;
         }
 
+        TicToc t_imuDeskewInfo;
         imuDeskewInfo();
+        if (write_time_log){
+            time_log(fp_time_imuDeskewInfo, t_imuDeskewInfo.toc());
+        }
 
+        TicToc t_odomDeskewInfo;
         odomDeskewInfo();
+        if (write_time_log){
+            time_log(fp_time_odomDeskewInfo, t_odomDeskewInfo.toc());
+        }
 
         return true;
     }
@@ -364,10 +489,10 @@ public:
     void odomDeskewInfo()
     {
         cloudInfo.odomAvailable = false;
-
+        static float sync_diff_time = (imuRate >= 300) ? 0.01 : 0.20;
         while (!odomQueue.empty())
         {
-            if (odomQueue.front().header.stamp.toSec() < timeScanCur - 0.01)
+            if (odomQueue.front().header.stamp.toSec() < timeScanCur - sync_diff_time)
                 odomQueue.pop_front();
             else
                 break;
@@ -379,7 +504,7 @@ public:
         if (odomQueue.front().header.stamp.toSec() > timeScanCur)
             return;
 
-        // get start odometry at the beinning of the scan
+        // get start odometry at the beginning of the scan
         nav_msgs::Odometry startOdomMsg;
 
         for (int i = 0; i < (int)odomQueue.size(); ++i)
@@ -520,7 +645,7 @@ public:
 
     void projectPointCloud()
     {
-        int cloudSize = laserCloudIn->points.size();
+        int cloudSize = laserCloudIn->points.size(); // 78750
         // range image projection
         for (int i = 0; i < cloudSize; ++i)
         {
@@ -550,7 +675,7 @@ public:
                 if (columnIdn >= Horizon_SCAN)
                     columnIdn -= Horizon_SCAN;
             }
-            else if (sensor == SensorType::LIVOX)
+            else if (sensor == SensorType::LIVOX || sensor == SensorType::RSLIDARM1)
             {
                 columnIdn = columnIdnCountVec[rowIdn];
                 columnIdnCountVec[rowIdn] += 1;
@@ -562,7 +687,14 @@ public:
             if (rangeMat.at<float>(rowIdn, columnIdn) != FLT_MAX)
                 continue;
 
-            thisPoint = deskewPoint(&thisPoint, laserCloudIn->points[i].time);
+            if (imuDeskewPoint)
+            {
+                TicToc t_deskewPoint;
+                thisPoint = deskewPoint(&thisPoint, laserCloudIn->points[i].time);
+                if (write_time_log){
+                    time_log(fp_time_deskewPoint, t_deskewPoint.toc());
+                }
+            }
 
             rangeMat.at<float>(rowIdn, columnIdn) = range;
 
@@ -595,6 +727,7 @@ public:
             }
             cloudInfo.endRingIndex[i] = count -1 - 5;
         }
+//        std::cout << extractedCloud->size() << std::endl;
     }
     
     void publishClouds()
