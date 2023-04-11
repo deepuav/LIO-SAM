@@ -1,4 +1,5 @@
 #include <cv.hpp>
+#include <cv_bridge/cv_bridge.h>
 #include "utility.h"
 #include "lio_sam/cloud_info.h"
 #include "tic_toc.h"
@@ -13,7 +14,13 @@ FILE *fp_time_projectPointCloud;
 FILE *fp_time_deskewPoint;
 FILE *fp_time_cloudExtraction;
 
-bool visualize_rangeimage = false;
+extern const float segmentTheta = 15.0 / 180.0 * M_PI; // default: 60
+extern const int segmentMinPointNum = 120; // default: 30
+extern const int segmentValidPointNum = 20; // default: 5
+extern const int segmentValidLineNum = 12; // default: 3
+extern const float segmentAlphaX = 0.2 / 180.0 * M_PI;
+extern const float segmentAlphaY = 0.2 / 180.0 * M_PI;
+
 bool use_ring_channel = false;
 
 struct VelodynePointXYZIRT
@@ -72,7 +79,9 @@ private:
 
     ros::Subscriber subLaserCloud;
     ros::Publisher  pubLaserCloud;
-    
+
+    ros::Publisher pubImage;
+
     ros::Publisher pubExtractedCloud;
     ros::Publisher pubLaserCloudInfo;
 
@@ -103,6 +112,18 @@ private:
     int deskewFlag;
     cv::Mat rangeMat;
     cv::Mat rangeMat_visualization;
+    cv::Mat labelMat;
+    cv::Mat labelMat_visualization;
+
+    std::vector<std::pair<int8_t, int8_t> > neighborIterator; // neighbor iterator for segmentaiton process
+
+    uint16_t *allPushedIndX; // array for tracking points of a segmented object
+    uint16_t *allPushedIndY;
+
+    uint16_t *queueIndX; // array for breadth-first search process of segmentation, for speed
+    uint16_t *queueIndY;
+
+    int labelCount;
     int numFrame = 0;
 
     bool odomDeskewFlag;
@@ -135,6 +156,7 @@ public:
         subOdom       = nh.subscribe<nav_msgs::Odometry>(odomTopic+"_incremental", 2000, &ImageProjection::odometryHandler, this, ros::TransportHints().tcpNoDelay());
         subLaserCloud = nh.subscribe<sensor_msgs::PointCloud2>(pointCloudTopic, 2000, &ImageProjection::cloudHandler, this, ros::TransportHints().tcpNoDelay());
 
+        pubImage          = nh.advertise<sensor_msgs::Image>("lio_sam/deskew/image_stack", 1);
         pubExtractedCloud = nh.advertise<sensor_msgs::PointCloud2> ("lio_sam/deskew/cloud_deskewed", 1);
         pubLaserCloudInfo = nh.advertise<lio_sam::cloud_info> ("lio_sam/deskew/cloud_info", 1);
 
@@ -180,6 +202,22 @@ public:
         cloudInfo.pointColInd.assign(N_SCAN*Horizon_SCAN, 0);
         cloudInfo.pointRange.assign(N_SCAN*Horizon_SCAN, 0);
 
+        std::pair<int8_t, int8_t> neighbor;
+        neighbor.first = -1; neighbor.second =  0; neighborIterator.push_back(neighbor);
+        neighbor.first =  0; neighbor.second =  1; neighborIterator.push_back(neighbor);
+        neighbor.first =  0; neighbor.second = -1; neighborIterator.push_back(neighbor);
+        neighbor.first =  1; neighbor.second =  0; neighborIterator.push_back(neighbor);
+        neighbor.first =  0; neighbor.second =  2; neighborIterator.push_back(neighbor);
+        neighbor.first =  0; neighbor.second =  -2; neighborIterator.push_back(neighbor);
+//        neighbor.first =  2; neighbor.second =  0; neighborIterator.push_back(neighbor);
+//        neighbor.first =  -2; neighbor.second =  0; neighborIterator.push_back(neighbor);
+
+        allPushedIndX = new uint16_t[N_SCAN_EXTENDED*Horizon_SCAN];
+        allPushedIndY = new uint16_t[N_SCAN_EXTENDED*Horizon_SCAN];
+
+        queueIndX = new uint16_t[N_SCAN_EXTENDED*Horizon_SCAN];
+        queueIndY = new uint16_t[N_SCAN_EXTENDED*Horizon_SCAN];
+
         resetParameters();
     }
 
@@ -190,6 +228,10 @@ public:
         // reset range matrix for range image projection
         rangeMat = cv::Mat(N_SCAN_EXTENDED, Horizon_SCAN, CV_32F, cv::Scalar(0));
         rangeMat_visualization = cv::Mat(N_SCAN_EXTENDED, Horizon_SCAN, CV_8UC1, cv::Scalar(0));
+        // reset label matrix for clustering
+        labelMat = cv::Mat(N_SCAN_EXTENDED, Horizon_SCAN, CV_32S, cv::Scalar(0));
+        labelMat_visualization = cv::Mat(N_SCAN_EXTENDED, Horizon_SCAN, CV_8UC3, cv::Scalar(0,0,0));
+        labelCount = 1;
 
         imuPointerCur = 0;
         firstPointFlag = true;
@@ -263,11 +305,14 @@ public:
         TicToc t_projectPointCloud;
         projectPointCloud(pointId_to_pixel, pixelId_to_point);
 
-        if (visualize_rangeimage)
-            cv::imwrite("/home/wyb/Documents/liosam_rangeimage/frame" + to_string(numFrame) + ".jpg", rangeMat_visualization);
-
         if (write_time_log)
             time_log(fp_time_projectPointCloud, t_projectPointCloud.toc());
+
+        cloudSegmentation(pixelId_to_point);
+
+        labelMat_visualization = LabelsToColor(labelMat);
+
+        publishImages();
 
         TicToc t_cloudExtraction;
         cloudExtraction(pixelId_to_point);
@@ -761,6 +806,13 @@ public:
         }
 
         complementRangeImage(pixelId_to_point);
+
+        for (int i = 0; i < N_SCAN_EXTENDED; ++i) {
+            for (int j = 0; j < Horizon_SCAN; ++j) {
+                if (rangeMat.at<float>(i,j) == 0)
+                    labelMat.at<int>(i,j) = -1;
+            }
+        }
     }
 
     void complementRangeImage(PixelIdToPoint &pixelId_to_point)
@@ -816,6 +868,163 @@ public:
         /*cv::GaussianBlur(rangeMat, rangeMat, cv::Size(3, 3), 0, 0);
         cv::medianBlur(rangeMat, rangeMat, 3);
         cv::blur(rangeMat, rangeMat, cv::Size(5,5));*/
+    }
+
+    void cloudSegmentation(PixelIdToPoint& pixelId_to_point) {
+        // segmentation process
+        for (int i = 0; i < N_SCAN_EXTENDED; ++i) {
+            for (int j = 0; j < Horizon_SCAN; ++j) {
+                if (labelMat.at<int>(i, j) == 0)
+                    labelComponents(i, j, pixelId_to_point);
+            }
+        }
+    }
+
+    void labelComponents(int row, int col, PixelIdToPoint& pixelId_to_point){
+        float d_origin, d_nei, d_diff, d_max;
+        float d1, d2, alpha, angle;
+        int fromIndX, fromIndY, thisIndX, thisIndY;
+        bool lineCountFlag[130] = {false};
+
+        queueIndX[0] = row;
+        queueIndY[0] = col;
+        int queueSize = 1;
+        int queueStartInd = 0;
+        int queueEndInd = 1;
+
+        allPushedIndX[0] = row;
+        allPushedIndY[0] = col;
+        int allPushedIndSize = 1;
+
+        // BFS
+        while(queueSize > 0){
+            // Pop point
+            fromIndX = queueIndX[queueStartInd];
+            fromIndY = queueIndY[queueStartInd];
+            --queueSize;
+            ++queueStartInd;
+            // Mark popped point
+            labelMat.at<int>(fromIndX, fromIndY) = labelCount;
+
+            // Loop through all the neighboring grids of popped grid
+            // neighbor=[[-1,0];[0,1];[0,-1];[1,0]]
+            for (auto iter = neighborIterator.begin(); iter != neighborIterator.end(); ++iter){
+                // new index
+                thisIndX = fromIndX + (*iter).first;
+                thisIndY = fromIndY + (*iter).second;
+                // index should be within the boundary
+                if (thisIndX < 0 || thisIndX >= N_SCAN_EXTENDED)
+                    continue;
+                // at range image margin (left or right side)
+                if (thisIndY < 0)
+                    thisIndY = Horizon_SCAN - 1;
+                if (thisIndY >= Horizon_SCAN)
+                    thisIndY = 0;
+
+                // prevent infinite loop (caused by put already examined point back)
+                if (labelMat.at<int>(thisIndX, thisIndY) != 0)
+                    continue;
+
+                d_origin = rangeMat.at<float>(fromIndX, fromIndY);
+                d_nei = rangeMat.at<float>(thisIndX, thisIndY);
+                d_diff = fabs(d_origin - d_nei);
+                d1 = std::max(rangeMat.at<float>(fromIndX, fromIndY),
+                              rangeMat.at<float>(thisIndX, thisIndY));
+                d2 = std::min(rangeMat.at<float>(fromIndX, fromIndY),
+                              rangeMat.at<float>(thisIndX, thisIndY));
+
+                if ((*iter).first == 0){
+                    d_max = (d_origin) * sin(segmentAlphaX)/sin(25*M_PI/180 - segmentAlphaX) + 3*0.15; // 0.1
+                    alpha = segmentAlphaX;
+                }
+                else{
+                    d_max = (d_origin) * sin(segmentAlphaY)/sin(6*M_PI/180 -segmentAlphaY) + 0.5; // 0.5
+                    alpha = segmentAlphaY;
+                }
+
+//                d_dist = sqrt(d_origin * d_origin + d_nei * d_nei - 2 * d_origin * d_nei * cos(alpha));
+                angle = atan2(d2*sin(alpha), (d1 -d2*cos(alpha)));
+
+//                if (d_diff < d_max && angle > segmentTheta){
+                if (angle > segmentTheta){
+//                if (horizontal_smoothness.at<float>(thisIndX, thisIndY) < segmentThreshold_horizontal_smoothness_min){
+//                if (vertical_smoothness.at<float>(thisIndX, thisIndY) < segmentThreshold_vertical_smoothness_min){
+//                if (surronding_smoothness.at<float>(thisIndX, thisIndY) < segmentThreshold_surronding_smoothness_min){
+//                if (d_dist < 0.8){
+//                if (angle > segmentTheta && d_dist < 0.8){
+//                if (d_diff < d_max){
+                    queueIndX[queueEndInd] = thisIndX;
+                    queueIndY[queueEndInd] = thisIndY;
+                    ++queueSize;
+                    ++queueEndInd;
+
+                    labelMat.at<int>(thisIndX, thisIndY) = labelCount;
+                    lineCountFlag[thisIndX] = true;
+
+                    allPushedIndX[allPushedIndSize] = thisIndX;
+                    allPushedIndY[allPushedIndSize] = thisIndY;
+                    ++allPushedIndSize;
+                }
+            }
+        }
+
+        // check if this segment is valid
+        bool feasibleSegment = false;
+
+        if (allPushedIndSize >= segmentMinPointNum) // default: 30
+            feasibleSegment = true;
+        else if (allPushedIndSize >= segmentValidPointNum){
+            int lineCount = 0;
+            for (int i = 0; i < N_SCAN_EXTENDED; ++i)
+                if (lineCountFlag[i])
+                    ++lineCount;
+            if (lineCount >= segmentValidLineNum)
+                feasibleSegment = true;
+        }
+        // segment is valid, mark these points
+        if (feasibleSegment){
+            ++labelCount;
+        }else{ // segment is invalid, mark these points
+            for (int i = 0; i < allPushedIndSize; ++i){
+                labelMat.at<int>(allPushedIndX[i], allPushedIndY[i]) = 999999;
+            }
+        }
+    }
+
+    cv::Mat LabelsToColor(const cv::Mat& label_image) {
+        cv::Mat color_image(label_image.size(), CV_8UC3, cv::Scalar(0, 0, 0));
+
+        for (int row = 0; row < label_image.rows; ++row) {
+            for (int col = 0; col < label_image.cols; ++col) {
+                if (label_image.at<int>(row, col) > 0 && label_image.at<int>(row, col) != 999999){
+                    auto label = label_image.at<int>(row, col);
+                    auto random_color = RANDOM_COLORS[label % RANDOM_COLORS.size()];
+                    cv::Vec3b color = cv::Vec3b(random_color[0], random_color[1], random_color[2]);
+                    color_image.at<cv::Vec3b>(row, col) = color;
+                }
+            }
+        }
+        return color_image;
+    }
+
+    void pubImages(ros::Publisher *this_pub, const cv::Mat& this_image, std_msgs::Header this_header, string image_format)
+    {
+        static cv_bridge::CvImage bridge;
+        bridge.header = this_header;
+        bridge.encoding = image_format;
+        bridge.image = this_image;
+        this_pub->publish(bridge.toImageMsg());
+    }
+
+    void publishImages(){
+        cv::Mat image_visualization;
+        image_visualization = rangeMat_visualization;
+        cv::cvtColor(image_visualization, image_visualization, CV_GRAY2RGB);
+        cv::vconcat(image_visualization, labelMat_visualization, image_visualization);
+
+        cv::putText(image_visualization, "Range_projected",   cv::Point2f(5, 20 + N_SCAN*0), CV_FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255,0,255), 2);
+        cv::putText(image_visualization, "Label_color",   cv::Point2f(5, 20 + N_SCAN_EXTENDED*1), CV_FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255,0,255), 2);
+        pubImages(&pubImage, image_visualization, cloudHeader, "bgr8");
     }
 
     void cloudExtraction(PixelIdToPoint &pixelId_to_point)
