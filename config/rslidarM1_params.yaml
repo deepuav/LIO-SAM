@@ -45,11 +45,16 @@ lio_sam:
 
   # Sensor Settings
   sensor: rslidarm1                            # lidar sensor type, 'velodyne' or 'ouster' or 'livox'
-  N_SCAN: 5                                  # number of lidar channel (i.e., Velodyne/Ouster: 16, 32, 64, 128, Livox Horizon: 6)
-  Horizon_SCAN: 15750                          # lidar horizontal resolution (Velodyne:1800, Ouster:512,1024,2048, Livox Horizon: 4000)
+  N_SCAN: 126                                  # number of lidar channel (i.e., Velodyne/Ouster: 16, 32, 64, 128, Livox Horizon: 6)
+  N_SCAN_EXTENDED: 130
+  Horizon_SCAN: 625                          # lidar horizontal resolution (Velodyne:1800, Ouster:512,1024,2048, Livox Horizon: 4000)
   downsampleRate: 1                           # default: 1. Downsample your data if too many points. i.e., 16 = 64 / 4, 16 = 16 / 1
-  lidarMinRange: 0.5                          # default: 1.0, minimum lidar range to be used
+  lidarMinRange: 0.1                          # default: 1.0, minimum lidar range to be used
   lidarMaxRange: 200.0                       # default: 1000.0, maximum lidar range to be used
+  left_angle: 28.0
+  bottom_angle: -14.0
+  resolution_x: 0.2
+  resolution_y: 0.2
   subscanNum: 6                             # default: 6, 将rangeImage的每行点分成subscanNum段，用来提特征点
   largestEdgeNum: 20                        # default: 20, 每段subscan中edge特征点数量
   imuDeskewPoint: true

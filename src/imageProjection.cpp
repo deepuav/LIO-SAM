@@ -1,3 +1,4 @@
+#include <cv.hpp>
 #include "utility.h"
 #include "lio_sam/cloud_info.h"
 #include "tic_toc.h"
@@ -11,6 +12,9 @@ FILE *fp_time_odomDeskewInfo;
 FILE *fp_time_projectPointCloud;
 FILE *fp_time_deskewPoint;
 FILE *fp_time_cloudExtraction;
+
+bool visualize_rangeimage = false;
+bool use_ring_channel = false;
 
 struct VelodynePointXYZIRT
 {
@@ -98,6 +102,8 @@ private:
 
     int deskewFlag;
     cv::Mat rangeMat;
+    cv::Mat rangeMat_visualization;
+    int numFrame = 0;
 
     bool odomDeskewFlag;
     float odomIncreX;
@@ -127,7 +133,7 @@ public:
     {
         subImu        = nh.subscribe<sensor_msgs::Imu>(imuTopic, 2000, &ImageProjection::imuHandler, this, ros::TransportHints().tcpNoDelay());
         subOdom       = nh.subscribe<nav_msgs::Odometry>(odomTopic+"_incremental", 2000, &ImageProjection::odometryHandler, this, ros::TransportHints().tcpNoDelay());
-        subLaserCloud = nh.subscribe<sensor_msgs::PointCloud2>(pointCloudTopic, 5, &ImageProjection::cloudHandler, this, ros::TransportHints().tcpNoDelay());
+        subLaserCloud = nh.subscribe<sensor_msgs::PointCloud2>(pointCloudTopic, 2000, &ImageProjection::cloudHandler, this, ros::TransportHints().tcpNoDelay());
 
         pubExtractedCloud = nh.advertise<sensor_msgs::PointCloud2> ("lio_sam/deskew/cloud_deskewed", 1);
         pubLaserCloudInfo = nh.advertise<lio_sam::cloud_info> ("lio_sam/deskew/cloud_info", 1);
@@ -168,8 +174,8 @@ public:
 
         fullCloud->points.resize(N_SCAN*Horizon_SCAN);
 
-        cloudInfo.startRingIndex.assign(N_SCAN, 0);
-        cloudInfo.endRingIndex.assign(N_SCAN, 0);
+        cloudInfo.startRingIndex.assign(N_SCAN_EXTENDED, 0);
+        cloudInfo.endRingIndex.assign(N_SCAN_EXTENDED, 0);
 
         cloudInfo.pointColInd.assign(N_SCAN*Horizon_SCAN, 0);
         cloudInfo.pointRange.assign(N_SCAN*Horizon_SCAN, 0);
@@ -182,7 +188,8 @@ public:
         laserCloudIn->clear();
         extractedCloud->clear();
         // reset range matrix for range image projection
-        rangeMat = cv::Mat(N_SCAN, Horizon_SCAN, CV_32F, cv::Scalar::all(FLT_MAX));
+        rangeMat = cv::Mat(N_SCAN_EXTENDED, Horizon_SCAN, CV_32F, cv::Scalar(0));
+        rangeMat_visualization = cv::Mat(N_SCAN_EXTENDED, Horizon_SCAN, CV_8UC1, cv::Scalar(0));
 
         imuPointerCur = 0;
         firstPointFlag = true;
@@ -196,7 +203,7 @@ public:
             imuRotZ[i] = 0;
         }
 
-        columnIdnCountVec.assign(N_SCAN, 0);
+        columnIdnCountVec.assign(N_SCAN_EXTENDED, 0);
     }
 
     ~ImageProjection(){}
@@ -250,21 +257,27 @@ public:
         if (!deskewInfo())
             return;
 
+        PointIdToPixel pointId_to_pixel(Horizon_SCAN, N_SCAN);
+        PixelIdToPoint pixelId_to_point(Horizon_SCAN, N_SCAN_EXTENDED);
+
         TicToc t_projectPointCloud;
-        projectPointCloud();
-        if (write_time_log){
+        projectPointCloud(pointId_to_pixel, pixelId_to_point);
+
+        if (visualize_rangeimage)
+            cv::imwrite("/home/wyb/Documents/liosam_rangeimage/frame" + to_string(numFrame) + ".jpg", rangeMat_visualization);
+
+        if (write_time_log)
             time_log(fp_time_projectPointCloud, t_projectPointCloud.toc());
-        }
 
         TicToc t_cloudExtraction;
-        cloudExtraction();
-        if (write_time_log){
+        cloudExtraction(pixelId_to_point);
+        if (write_time_log)
             time_log(fp_time_cloudExtraction, t_cloudExtraction.toc());
-        }
 
         publishClouds();
 
         resetParameters();
+        numFrame++;
     }
 
     bool cachePointCloud(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
@@ -304,7 +317,22 @@ public:
         {
             // Convert to Velodyne format
             pcl::moveFromROSMsg(currentCloudMsg, *tmpRslidarM1CloudIn);
-//            laserCloudIn->points.resize(tmpRslidarM1CloudIn->size());
+            laserCloudIn->points.resize(tmpRslidarM1CloudIn->size());
+            laserCloudIn->is_dense = true;
+            double first_point_timestamp = tmpRslidarM1CloudIn->points[0].timestamp;
+            for (size_t i = 0; i < tmpRslidarM1CloudIn->size(); i++)
+            {
+                auto &src = tmpRslidarM1CloudIn->points[i];
+                auto &dst = laserCloudIn->points[i];
+                dst.x = src.x;
+                dst.y = src.y;
+                dst.z = src.z;
+                dst.intensity = src.intensity;
+                dst.ring = src.ring;
+                dst.time = src.timestamp - first_point_timestamp;
+            }
+
+/*
             double first_point_timestamp = tmpRslidarM1CloudIn->at(0,0).timestamp;
             std::vector<pcl::PointCloud<PointXYZIRT>> pointcloud_subcloud_channel(5);
             for (size_t i_row = 0; i_row < tmpRslidarM1CloudIn->width; ++i_row)
@@ -321,23 +349,18 @@ public:
                     pointcloud_subcloud_channel[i_row].push_back(added_pt);
                 }
             }
-            for (int i_subcloud = 0; i_subcloud < N_SCAN; ++i_subcloud)
+            for (int i_subcloud = 0; i_subcloud < 5; ++i_subcloud)
             {
                 for (size_t i = 0; i < pointcloud_subcloud_channel[i_subcloud].size(); ++i)
                 {
-//                    auto &src = pointcloud_subcloud_channel[i_subcloud].points[i];
-//                    auto &dst = laserCloudIn->points[i + i_subcloud * Horizon_SCAN];
-//                    dst = src;
                     float pt_x = pointcloud_subcloud_channel[i_subcloud].points[i].x;
                     float pt_y = pointcloud_subcloud_channel[i_subcloud].points[i].y;
                     float pt_z = pointcloud_subcloud_channel[i_subcloud].points[i].z;
                     if (pt_x * pt_x + pt_y * pt_y + pt_z * pt_z < 200 * 200)
-                    {
                         laserCloudIn->push_back(pointcloud_subcloud_channel[i_subcloud].points[i]);
-                    }
                 }
             }
-//            std::cout << "check laserCloudIn size: " << laserCloudIn->size() << std::endl;
+*/
         }
         else
         {
@@ -643,9 +666,14 @@ public:
         return newPoint;
     }
 
-    void projectPointCloud()
+    void projectPointCloud(PointIdToPixel& pointId_to_pixel, PixelIdToPoint& pixelId_to_point)
     {
-        int cloudSize = laserCloudIn->points.size(); // 78750
+        float ang_bottom = bottom_angle;
+        float ang_left = left_angle;
+        float ang_res_y = resolution_y;
+        float ang_res_x = resolution_x;
+
+        int cloudSize = laserCloudIn->points.size();
         // range image projection
         for (int i = 0; i < cloudSize; ++i)
         {
@@ -659,8 +687,18 @@ public:
             if (range < lidarMinRange || range > lidarMaxRange)
                 continue;
 
-            int rowIdn = laserCloudIn->points[i].ring;
-            if (rowIdn < 0 || rowIdn >= N_SCAN)
+            float verticalAngle = atan2(thisPoint.z, sqrt(thisPoint.x * thisPoint.x + thisPoint.y * thisPoint.y)) * 180 / M_PI;
+            float horizonAngle = atan2(thisPoint.x, thisPoint.y) * 180 / M_PI;
+
+            int rowIdn;
+            if (use_ring_channel){
+                rowIdn = laserCloudIn->points[i].ring;
+            } else{
+                rowIdn = (verticalAngle - ang_bottom) / ang_res_y;
+                rowIdn = N_SCAN_EXTENDED - rowIdn; // pixel start from the top
+            }
+
+            if (rowIdn < 0 || rowIdn >= N_SCAN_EXTENDED)
                 continue;
 
             if (rowIdn % downsampleRate != 0)
@@ -677,14 +715,19 @@ public:
             }
             else if (sensor == SensorType::LIVOX || sensor == SensorType::RSLIDARM1)
             {
-                columnIdn = columnIdnCountVec[rowIdn];
+//                columnIdn = columnIdnCountVec[rowIdn];
+                columnIdn = (horizonAngle - ang_left) / ang_res_x;
                 columnIdnCountVec[rowIdn] += 1;
+            }
+
+            if (columnIdn >= Horizon_SCAN) {
+                columnIdn -= Horizon_SCAN;
             }
             
             if (columnIdn < 0 || columnIdn >= Horizon_SCAN)
                 continue;
 
-            if (rangeMat.at<float>(rowIdn, columnIdn) != FLT_MAX)
+            if (rangeMat.at<float>(rowIdn, columnIdn) != 0)
                 continue;
 
             if (imuDeskewPoint)
@@ -696,31 +739,109 @@ public:
                 }
             }
 
-            rangeMat.at<float>(rowIdn, columnIdn) = range;
+            // 存放每个投影点在rangeImage上的像素id: columnId, rowId
+            pair<int, int> range_image_pixel_id;
+            range_image_pixel_id.first = columnIdn;
+            range_image_pixel_id.second = rowIdn;
+            pointId_to_pixel.pixel_vec_[i] = range_image_pixel_id;
 
-            int index = columnIdn + rowIdn * Horizon_SCAN;
-            fullCloud->points[index] = thisPoint;
+            // 存放rangeImage上每个像素对应的多个投影点的id
+            float point_id = i;
+            pair<float, int> point_cloud_point_range_id;
+            point_cloud_point_range_id.first = range;
+            point_cloud_point_range_id.second = point_id;
+            pixelId_to_point.point_vec_[columnIdn + rowIdn * Horizon_SCAN].insert(point_cloud_point_range_id);
+
+            rangeMat.at<float>(rowIdn, columnIdn) = range;
+            rangeMat_visualization.at<uint8_t>(rowIdn, columnIdn) = std::max(float(255 * (1- range / lidarMaxRange)), 0.0f);
+
+            /*int index = columnIdn + rowIdn * Horizon_SCAN;*/
+            int index = i;
+            fullCloud->points[index] = thisPoint; // save deskewed point
         }
+
+        complementRangeImage(pixelId_to_point);
     }
 
-    void cloudExtraction()
+    void complementRangeImage(PixelIdToPoint &pixelId_to_point)
+    {
+        // rangeImage每个像素取set中最小的range(遮挡原因，最小range在最前面)
+        for (int rowIdn = 0; rowIdn < rangeMat.rows; rowIdn++){
+            for (int columnIdn = 0; columnIdn < rangeMat.cols; columnIdn++){
+                if (rangeMat.at<float>(rowIdn, columnIdn) != 0 && pixelId_to_point.point_vec_[columnIdn + rowIdn * Horizon_SCAN].size() > 1){
+                    pair<int, int> p_pixel_id(columnIdn, rowIdn);
+                    rangeMat.at<float>(rowIdn, columnIdn) = pixelId_to_point.toFindPointIdAndRange(p_pixel_id).begin()->first;
+                    rangeMat_visualization.at<uint8_t>(rowIdn, columnIdn) = std::max(float(255 * (1- pixelId_to_point.toFindPointIdAndRange(p_pixel_id).begin()->first / lidarMaxRange)), 0.0f);
+                }
+            }
+        }
+
+        cv::Mat rangeMat_copy = rangeMat.clone();
+        cv::Mat rangeMat_visualization_copy = rangeMat_visualization.clone();
+
+        //look up table to complete holes in image, find neighboor valid pixels and use their average if there are enough valid neighboors
+        int ary_look_table_y[8]={-1,-1,-1,0,0,1,1,1};
+        int ary_look_table_x[8]={-1,0,1,-1,1,-1,0,1};
+        //wider search
+        /*int ary_look_table_y[24]={-1,-1,-1,0,0,1,1,1,-2,-2,-2,-2,-2,-1,-1,0,0,1,1,2,2,2,2,2};
+        int ary_look_table_x[24]={-1,0,1,-1,1,-1,0,1,-2,-1,0,1,2,-2,2,-2,2,-2,2,-2,-1,0,1,2};*/
+        for (int rowIdn = 2; rowIdn < rangeMat.rows-2; rowIdn++){
+            for (int columnIdn = 2; columnIdn < rangeMat.cols-2; columnIdn++){
+                if(rangeMat.at<float>(rowIdn, columnIdn) == 0){
+                    double valid_neighboor_range = 0;
+                    int valid_neighboor_count = 0;
+                    for(int look_step = 0; look_step < 8; look_step ++){
+                        if(rangeMat_copy.at<float>(rowIdn + ary_look_table_y[look_step], columnIdn + ary_look_table_x[look_step]) != 0){
+                            valid_neighboor_count ++;
+                            valid_neighboor_range += rangeMat_copy.at<float>(rowIdn + ary_look_table_y[look_step], columnIdn + ary_look_table_x[look_step]);
+                        }
+                        if(valid_neighboor_count > 3){
+//                            image_range_project.at<uint8_t>(rowIdn, columnIdn) = valid_neighboor_range / (1.0 * valid_neighboor_count);
+                            rangeMat.at<float>(rowIdn, columnIdn) = rangeMat_copy.at<float>(rowIdn + ary_look_table_y[look_step], columnIdn + ary_look_table_x[look_step]);
+                            rangeMat_visualization.at<uint8_t>(rowIdn, columnIdn) = rangeMat_visualization_copy.at<uint8_t>(rowIdn + ary_look_table_y[look_step], columnIdn + ary_look_table_x[look_step]);
+                            // 空的像素用其他像素补全了，那么这个空的像素对应点的索引就和补全它的像素对应点的索引保持一致
+                            pair<int, int> pixel_completion_id(columnIdn + ary_look_table_x[look_step], rowIdn + ary_look_table_y[look_step]);
+                            pair<float, int> point_completion_range_pointid;
+                            point_completion_range_pointid.first = pixelId_to_point.toFindPointIdAndRange(pixel_completion_id).begin()->first;
+                            point_completion_range_pointid.second = pixelId_to_point.toFindPointIdAndRange(pixel_completion_id).begin()->second;
+                            pixelId_to_point.point_vec_[columnIdn + rowIdn * Horizon_SCAN].insert(point_completion_range_pointid);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // smooth range image
+        /*cv::GaussianBlur(rangeMat, rangeMat, cv::Size(3, 3), 0, 0);
+        cv::medianBlur(rangeMat, rangeMat, 3);
+        cv::blur(rangeMat, rangeMat, cv::Size(5,5));*/
+    }
+
+    void cloudExtraction(PixelIdToPoint &pixelId_to_point)
     {
         int count = 0;
         // extract segmented cloud for lidar odometry
-        for (int i = 0; i < N_SCAN; ++i)
+        for (int i = 0; i < N_SCAN_EXTENDED; ++i)
         {
             cloudInfo.startRingIndex[i] = count - 1 + 5;
 
             for (int j = 0; j < Horizon_SCAN; ++j)
             {
-                if (rangeMat.at<float>(i,j) != FLT_MAX)
+                if (rangeMat.at<float>(i,j) != 0) // points exist
                 {
                     // mark the points' column index for marking occlusion later
                     cloudInfo.pointColInd[count] = j;
+
                     // save range info
-                    cloudInfo.pointRange[count] = rangeMat.at<float>(i,j);
+                    pair<int, int> pixel_id(j, i);
+                    cloudInfo.pointRange[count] = pixelId_to_point.toFindPointIdAndRange(pixel_id).begin()->first;
+                    /*cloudInfo.pointRange[count] = rangeMat.at<float>(i,j);*/
+
                     // save extracted cloud
-                    extractedCloud->push_back(fullCloud->points[j + i*Horizon_SCAN]);
+                    extractedCloud->push_back(fullCloud->points[pixelId_to_point.toFindPointIdAndRange(pixel_id).begin()->second]);
+                    /*extractedCloud->push_back(fullCloud->points[j + i*Horizon_SCAN]);*/
+
                     // size of extracted cloud
                     ++count;
                 }

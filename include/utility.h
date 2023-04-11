@@ -95,10 +95,15 @@ public:
     // Lidar Sensor Configuration
     SensorType sensor;
     int N_SCAN;
+    int N_SCAN_EXTENDED;
     int Horizon_SCAN;
     int downsampleRate;
     float lidarMinRange;
     float lidarMaxRange;
+    float left_angle;
+    float bottom_angle;
+    float resolution_x;
+    float resolution_y;
     int subscanNum;
     int largestEdgeNum;
     bool imuDeskewPoint = false;
@@ -208,10 +213,15 @@ public:
         }
 
         nh.param<int>("lio_sam/N_SCAN", N_SCAN, 16);
+        nh.param<int>("lio_sam/N_SCAN_EXTENDED", N_SCAN_EXTENDED, 130);
         nh.param<int>("lio_sam/Horizon_SCAN", Horizon_SCAN, 1800);
         nh.param<int>("lio_sam/downsampleRate", downsampleRate, 1);
         nh.param<float>("lio_sam/lidarMinRange", lidarMinRange, 1.0);
         nh.param<float>("lio_sam/lidarMaxRange", lidarMaxRange, 1000.0);
+        nh.param<float>("lio_sam/left_angle", left_angle, 28.0);
+        nh.param<float>("lio_sam/bottom_angle", bottom_angle, -14.0);
+        nh.param<float>("lio_sam/resolution_x", resolution_x, 0.2);
+        nh.param<float>("lio_sam/resolution_y", resolution_y, 0.2);
         nh.param<int>("lio_sam/subscanNum", subscanNum, 6);
         nh.param<int>("lio_sam/largestEdgeNum", largestEdgeNum, 20);
         nh.param<bool>("lio_sam/imuDeskewPoint", imuDeskewPoint, false);
@@ -361,5 +371,55 @@ float pointDistance(PointType p1, PointType p2)
 {
     return sqrt((p1.x-p2.x)*(p1.x-p2.x) + (p1.y-p2.y)*(p1.y-p2.y) + (p1.z-p2.z)*(p1.z-p2.z));
 }
+
+// 根据点云中point的Id找到其投影到rangeImage上pixel的Id
+class PointIdToPixel
+{
+public:
+
+    int cloud_width_;
+    int cloud_height_;
+    vector<pair<int, int>> pixel_vec_; // pair中存放v，u
+
+    PointIdToPixel(const int& width, const int& height)
+    {
+        cloud_width_ = width;
+        cloud_height_ = height;
+        pixel_vec_.resize(width * height, pair<int, int>(-1,-1));
+    }
+
+    ~PointIdToPixel(){}
+
+    // 该函数返回rangeImage上pixel的 v, u
+    pair<int, int> toFindPixelId(const int& pointId)
+    {
+        return pixel_vec_[pointId];
+    }
+};
+
+// 根据rangeImage上pixel的Id找到其对应点云中points的Ids和各个point的range值，其中pair.first是range，pair.second是点云中point的Id
+class PixelIdToPoint
+{
+public:
+
+    int image_width_;
+    int image_height;
+    vector<set<pair<float, int>>> point_vec_; // pair中存放(range, pointId), pointId:point在点云中的Id
+
+    PixelIdToPoint(const int& width, const int& height)
+    {
+        image_width_ = width;
+        image_height = height;
+        point_vec_.resize(width * height);
+    }
+
+    ~PixelIdToPoint(){}
+
+    // 该函数返回pointCloud中投影到一个pixel上的points的集合
+    set<pair<float, int>> toFindPointIdAndRange(const pair<int, int>& pixelId)
+    {
+        return point_vec_[pixelId.first + pixelId.second * image_width_];
+    }
+};
 
 #endif
