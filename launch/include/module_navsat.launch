@@ -10,11 +10,20 @@
     </node>
 
     <!-- Navsat -->
+
     <node pkg="robot_localization" type="navsat_transform_node" name="navsat" respawn="true">
-        <!-- <rosparam param="datum">[42.35893211, -71.09345588, 0.0, world, base_link]</rosparam> -->
+        <!-- <rosparam param="datum">[55.753258, 48.744454, 0.0, map, base_link]</rosparam> -->
         <remap from="imu/data" to="imu_correct" />
-        <remap from="gps/fix" to="gps/fix" />
+        <remap from="gps/fix" to="/gps/fix" />
         <remap from="odometry/filtered" to="odometry/navsat" />
+        <param name="zero_altitude" type="bool" value="false" />
     </node>
+
+
+    <node name="transform_imu" pkg="topic_tools" type="transform"
+        args="/imu/data /imu_correct sensor_msgs/Imu 'sensor_msgs.msg.Imu(header=std_msgs.msg.Header(seq=m.header.seq,stamp=m.header.stamp,frame_id=&quot;base_link&quot;), orientation=m.orientation, orientation_covariance=m.orientation_covariance, angular_velocity=m.angular_velocity, angular_velocity_covariance=m.angular_velocity_covariance, linear_acceleration=m.linear_acceleration, linear_acceleration_covariance=m.linear_acceleration_covariance )' --import sensor_msgs std_msgs --wait-for-start"/>
+
+    <node name="transform_gps" pkg="topic_tools" type="transform"
+        args="/gnss /gps/fix sensor_msgs/NavSatFix 'sensor_msgs.msg.NavSatFix(header=std_msgs.msg.Header(seq=m.header.seq,stamp=m.header.stamp,frame_id=&quot;base_link&quot;), status=m.status, latitude=m.latitude, longitude=m.longitude, altitude=m.altitude, position_covariance=m.position_covariance, position_covariance_type=m.position_covariance_type )' --import sensor_msgs std_msgs --wait-for-start"/>
 
 </launch>
