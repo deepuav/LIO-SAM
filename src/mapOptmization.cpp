@@ -1,5 +1,6 @@
 #include "utility.h"
 #include "lio_sam/cloud_info.h"
+#include "lio_sam/cloud_with_poses.h"
 #include "lio_sam/save_map.h"
 
 #include <gtsam/geometry/Rot3.h>
@@ -16,6 +17,11 @@
 #include <gtsam/inference/Symbol.h>
 
 #include <gtsam/nonlinear/ISAM2.h>
+
+#include "tic_toc.h"
+#include "write_log.h"
+
+FILE *fp_time_mapOptimization;
 
 using namespace gtsam;
 
@@ -74,6 +80,7 @@ public:
     ros::Publisher pubLoopConstraintEdge;
 
     ros::Publisher pubSLAMInfo;
+    ros::Publisher pubCloudWithPose;
 
     ros::Subscriber subCloud;
     ros::Subscriber subGPS;
@@ -83,6 +90,7 @@ public:
 
     std::deque<nav_msgs::Odometry> gpsQueue;
     lio_sam::cloud_info cloudInfo;
+    lio_sam::cloud_with_poses cloudWithPose;
 
     vector<pcl::PointCloud<PointType>::Ptr> cornerCloudKeyFrames;
     vector<pcl::PointCloud<PointType>::Ptr> surfCloudKeyFrames;
@@ -128,6 +136,7 @@ public:
     double timeLaserInfoCur;
 
     float transformTobeMapped[6];
+    Eigen::Affine3f last_transTobe; // T_{w}_{t-2}
 
     std::mutex mtx;
     std::mutex mtxLoopInfo;
@@ -152,6 +161,8 @@ public:
     Eigen::Affine3f transPointAssociateToMap;
     Eigen::Affine3f incrementalOdometryAffineFront;
     Eigen::Affine3f incrementalOdometryAffineBack;
+
+    std::string time_mapOptimization_path;
 
 
     mapOptimization()
@@ -182,6 +193,13 @@ public:
         pubCloudRegisteredRaw = nh.advertise<sensor_msgs::PointCloud2>("lio_sam/mapping/cloud_registered_raw", 1);
 
         pubSLAMInfo           = nh.advertise<lio_sam::cloud_info>("lio_sam/mapping/slam_info", 1);
+        pubCloudWithPose      = nh.advertise<lio_sam::cloud_with_poses>("lio_sam/mapping/cloud_with_pose", 1);
+
+        nh.param<std::string>("lio_sam/time_mapOptimization_path", time_mapOptimization_path, "/home/wyb/Documents/experimental_results/lio_sam/time/mapOptimization/t_mapOptimization.txt");
+
+        if (write_time_log){
+            fp_time_mapOptimization = fopen(time_mapOptimization_path.c_str(), "w");
+        }
 
         downSizeFilterCorner.setLeafSize(mappingCornerLeafSize, mappingCornerLeafSize, mappingCornerLeafSize);
         downSizeFilterSurf.setLeafSize(mappingSurfLeafSize, mappingSurfLeafSize, mappingSurfLeafSize);
@@ -252,6 +270,7 @@ public:
         {
             timeLastProcessing = timeLaserInfoCur;
 
+            TicToc t_mapOptimization;
             updateInitialGuess();
 
             extractSurroundingKeyFrames();
@@ -259,6 +278,9 @@ public:
             downsampleCurrentScan();
 
             scan2MapOptimization();
+            if (write_time_log){
+                time_log(fp_time_mapOptimization, t_mapOptimization.toc());
+            }
 
             saveKeyFramesAndFactor();
 
@@ -815,8 +837,15 @@ public:
                 lastImuPreTransformation = transBack;
                 lastImuPreTransAvailable = true;
             } else {
-                Eigen::Affine3f transIncre = lastImuPreTransformation.inverse() * transBack;
-                Eigen::Affine3f transTobe = trans2Affine3f(transformTobeMapped);
+                Eigen::Affine3f transTobe = trans2Affine3f(transformTobeMapped); // T_{w}_{t-1}
+                last_transTobe = transTobe; // last_transTobe = T_{w}_{t-2}
+                Eigen::Affine3f transIncre;
+                if (imuInitialGuess)
+                {
+                    transIncre = lastImuPreTransformation.inverse() * transBack;
+                } else {
+                    transIncre = last_transTobe.inverse() * transTobe; // T_{w}_{t-2}.inverse() * T_{w}_{t-1}
+                }
                 Eigen::Affine3f transFinal = transTobe * transIncre;
                 pcl::getTranslationAndEulerAngles(transFinal, transformTobeMapped[3], transformTobeMapped[4], transformTobeMapped[5], 
                                                               transformTobeMapped[0], transformTobeMapped[1], transformTobeMapped[2]);
@@ -1289,7 +1318,8 @@ public:
             kdtreeCornerFromMap->setInputCloud(laserCloudCornerFromMapDS);
             kdtreeSurfFromMap->setInputCloud(laserCloudSurfFromMapDS);
 
-            for (int iterCount = 0; iterCount < 30; iterCount++)
+            int iterCount;
+            for (iterCount = 0; iterCount < 30; iterCount++)
             {
                 laserCloudOri->clear();
                 coeffSel->clear();
@@ -1302,6 +1332,7 @@ public:
                 if (LMOptimization(iterCount) == true)
                     break;              
             }
+//            std::cout << "iteration count: " << iterCount << std::endl;
 
             transformUpdate();
         } else {
@@ -1654,11 +1685,31 @@ public:
         static bool lastIncreOdomPubFlag = false;
         static nav_msgs::Odometry laserOdomIncremental; // incremental odometry msg
         static Eigen::Affine3f increOdomAffine; // incremental odometry in affine
+
+        cloudWithPose.header = cloudInfo.header;
+        cloudWithPose.cloud_deskewed = cloudInfo.cloud_deskewed;
+        cloudWithPose.pose.assign(6, 0);
+        cloudWithPose.pose[0] = transformTobeMapped[0];
+        cloudWithPose.pose[1] = transformTobeMapped[1];
+        cloudWithPose.pose[2] = transformTobeMapped[2];
+        cloudWithPose.pose[3] = transformTobeMapped[3];
+        cloudWithPose.pose[4] = transformTobeMapped[4];
+        cloudWithPose.pose[5] = transformTobeMapped[5];
+
         if (lastIncreOdomPubFlag == false)
         {
             lastIncreOdomPubFlag = true;
             laserOdomIncremental = laserOdometryROS;
             increOdomAffine = trans2Affine3f(transformTobeMapped);
+
+            cloudWithPose.pose_incremental.assign(6, 0);
+            cloudWithPose.pose_incremental[0] = transformTobeMapped[0];
+            cloudWithPose.pose_incremental[1] = transformTobeMapped[1];
+            cloudWithPose.pose_incremental[2] = transformTobeMapped[2];
+            cloudWithPose.pose_incremental[3] = transformTobeMapped[3];
+            cloudWithPose.pose_incremental[4] = transformTobeMapped[4];
+            cloudWithPose.pose_incremental[5] = transformTobeMapped[5];
+
         } else {
             Eigen::Affine3f affineIncre = incrementalOdometryAffineFront.inverse() * incrementalOdometryAffineBack;
             increOdomAffine = increOdomAffine * affineIncre;
@@ -1693,6 +1744,15 @@ public:
             laserOdomIncremental.pose.pose.position.y = y;
             laserOdomIncremental.pose.pose.position.z = z;
             laserOdomIncremental.pose.pose.orientation = tf::createQuaternionMsgFromRollPitchYaw(roll, pitch, yaw);
+
+            cloudWithPose.pose_incremental.assign(6, 0);
+            cloudWithPose.pose_incremental[0] = roll;
+            cloudWithPose.pose_incremental[1] = pitch;
+            cloudWithPose.pose_incremental[2] = yaw;
+            cloudWithPose.pose_incremental[3] = x;
+            cloudWithPose.pose_incremental[4] = y;
+            cloudWithPose.pose_incremental[5] = z;
+
             if (isDegenerate)
                 laserOdomIncremental.pose.covariance[0] = 1;
             else
@@ -1718,6 +1778,10 @@ public:
             *cloudOut += *transformPointCloud(laserCloudSurfLastDS,    &thisPose6D);
             publishCloud(pubRecentKeyFrame, cloudOut, timeLaserInfoStamp, odometryFrame);
         }
+
+        // publish cloud with pose
+        pubCloudWithPose.publish(cloudWithPose);
+
         // publish registered high-res raw cloud
         if (pubCloudRegisteredRaw.getNumSubscribers() != 0)
         {

@@ -31,6 +31,7 @@ add_message_files(
   DIRECTORY msg
   FILES
   cloud_info.msg
+  cloud_with_poses.msg
 )
 
 add_service_files(

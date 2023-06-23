@@ -1,5 +1,27 @@
+#include <cv.hpp>
+#include <cv_bridge/cv_bridge.h>
 #include "utility.h"
 #include "lio_sam/cloud_info.h"
+#include "tic_toc.h"
+#include "write_log.h"
+
+FILE *fp_time_imuHandler;
+FILE *fp_time_odometryHandler;
+FILE *fp_time_cachePointCloud;
+FILE *fp_time_imuDeskewInfo;
+FILE *fp_time_odomDeskewInfo;
+FILE *fp_time_projectPointCloud;
+FILE *fp_time_deskewPoint;
+FILE *fp_time_cloudExtraction;
+
+extern const float segmentTheta = 15.0 / 180.0 * M_PI; // default: 60
+extern const int segmentMinPointNum = 120; // default: 30
+extern const int segmentValidPointNum = 20; // default: 5
+extern const int segmentValidLineNum = 12; // default: 3
+extern const float segmentAlphaX = 0.2 / 180.0 * M_PI;
+extern const float segmentAlphaY = 0.2 / 180.0 * M_PI;
+
+bool use_ring_channel = false;
 
 struct VelodynePointXYZIRT
 {
@@ -30,6 +52,19 @@ POINT_CLOUD_REGISTER_POINT_STRUCT(OusterPointXYZIRT,
     (uint8_t, ring, ring) (uint16_t, noise, noise) (uint32_t, range, range)
 )
 
+struct RslidarM1PointXYZIRT
+{
+    PCL_ADD_POINT4D
+    float intensity;
+    uint16_t ring;
+    double timestamp;
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+} EIGEN_ALIGN16;
+POINT_CLOUD_REGISTER_POINT_STRUCT(RslidarM1PointXYZIRT,
+                                  (float, x, x)(float, y, y)(float, z, z)(float, intensity, intensity)
+                                          (uint16_t, ring, ring)(double, timestamp, timestamp)
+)
+
 // Use the Velodyne point format as a common representation
 using PointXYZIRT = VelodynePointXYZIRT;
 
@@ -44,7 +79,9 @@ private:
 
     ros::Subscriber subLaserCloud;
     ros::Publisher  pubLaserCloud;
-    
+
+    ros::Publisher pubImage;
+
     ros::Publisher pubExtractedCloud;
     ros::Publisher pubLaserCloudInfo;
 
@@ -68,11 +105,26 @@ private:
 
     pcl::PointCloud<PointXYZIRT>::Ptr laserCloudIn;
     pcl::PointCloud<OusterPointXYZIRT>::Ptr tmpOusterCloudIn;
+    pcl::PointCloud<RslidarM1PointXYZIRT>::Ptr tmpRslidarM1CloudIn;
     pcl::PointCloud<PointType>::Ptr   fullCloud;
     pcl::PointCloud<PointType>::Ptr   extractedCloud;
 
     int deskewFlag;
     cv::Mat rangeMat;
+    cv::Mat rangeMat_visualization;
+    cv::Mat labelMat;
+    cv::Mat labelMat_visualization;
+
+    std::vector<std::pair<int8_t, int8_t> > neighborIterator; // neighbor iterator for segmentaiton process
+
+    uint16_t *allPushedIndX; // array for tracking points of a segmented object
+    uint16_t *allPushedIndY;
+
+    uint16_t *queueIndX; // array for breadth-first search process of segmentation, for speed
+    uint16_t *queueIndY;
+
+    int labelCount;
+    int numFrame = 0;
 
     bool odomDeskewFlag;
     float odomIncreX;
@@ -86,6 +138,15 @@ private:
 
     vector<int> columnIdnCountVec;
 
+    std::string time_imuHandler_path;
+    std::string time_odometryHandler_path;
+    std::string time_cachePointCloud_path;
+    std::string time_imuDeskewInfo_path;
+    std::string time_odomDeskewInfo_path;
+    std::string time_projectPointCloud_path;
+    std::string time_deskewPoint_path;
+    std::string time_cloudExtraction_path;
+
 
 public:
     ImageProjection():
@@ -93,10 +154,31 @@ public:
     {
         subImu        = nh.subscribe<sensor_msgs::Imu>(imuTopic, 2000, &ImageProjection::imuHandler, this, ros::TransportHints().tcpNoDelay());
         subOdom       = nh.subscribe<nav_msgs::Odometry>(odomTopic+"_incremental", 2000, &ImageProjection::odometryHandler, this, ros::TransportHints().tcpNoDelay());
-        subLaserCloud = nh.subscribe<sensor_msgs::PointCloud2>(pointCloudTopic, 5, &ImageProjection::cloudHandler, this, ros::TransportHints().tcpNoDelay());
+        subLaserCloud = nh.subscribe<sensor_msgs::PointCloud2>(pointCloudTopic, 2000, &ImageProjection::cloudHandler, this, ros::TransportHints().tcpNoDelay());
 
+        pubImage          = nh.advertise<sensor_msgs::Image>("lio_sam/deskew/image_stack", 1);
         pubExtractedCloud = nh.advertise<sensor_msgs::PointCloud2> ("lio_sam/deskew/cloud_deskewed", 1);
         pubLaserCloudInfo = nh.advertise<lio_sam::cloud_info> ("lio_sam/deskew/cloud_info", 1);
+
+        nh.param<std::string>("lio_sam/time_imuHandler_path", time_imuHandler_path, "/home/wyb/Documents/experimental_results/lio_sam/time/imageProjection/t_imuHandler.txt");
+        nh.param<std::string>("lio_sam/time_odometryHandler_path", time_odometryHandler_path, "/home/wyb/Documents/experimental_results/lio_sam/time/imageProjection/t_odometryHandler.txt");
+        nh.param<std::string>("lio_sam/time_cachePointCloud_path", time_cachePointCloud_path, "/home/wyb/Documents/experimental_results/lio_sam/time/imageProjection/t_cachePointCloud.txt");
+        nh.param<std::string>("lio_sam/time_imuDeskewInfo_path", time_imuDeskewInfo_path, "/home/wyb/Documents/experimental_results/lio_sam/time/imageProjection/t_imuDeskewInfo.txt");
+        nh.param<std::string>("lio_sam/time_odomDeskewInfo_path", time_odomDeskewInfo_path, "/home/wyb/Documents/experimental_results/lio_sam/time/imageProjection/t_odomDeskewInfo.txt");
+        nh.param<std::string>("lio_sam/time_projectPointCloud_path", time_projectPointCloud_path, "/home/wyb/Documents/experimental_results/lio_sam/time/imageProjection/t_projectPointCloud.txt");
+        nh.param<std::string>("lio_sam/time_deskewPoint_path", time_deskewPoint_path, "/home/wyb/Documents/experimental_results/lio_sam/time/imageProjection/t_deskewPoint.txt");
+        nh.param<std::string>("lio_sam/time_cloudExtraction_path", time_cloudExtraction_path, "/home/wyb/Documents/experimental_results/lio_sam/time/imageProjection/t_cloudExtraction.txt");
+
+        if (write_time_log){
+            fp_time_imuHandler = fopen(time_imuHandler_path.c_str(), "w");
+            fp_time_odometryHandler = fopen(time_odometryHandler_path.c_str(), "w");
+            fp_time_cachePointCloud = fopen(time_cachePointCloud_path.c_str(), "w");
+            fp_time_imuDeskewInfo = fopen(time_imuDeskewInfo_path.c_str(), "w");
+            fp_time_odomDeskewInfo = fopen(time_odomDeskewInfo_path.c_str(), "w");
+            fp_time_projectPointCloud = fopen(time_projectPointCloud_path.c_str(), "w");
+            fp_time_deskewPoint = fopen(time_deskewPoint_path.c_str(), "w");
+            fp_time_cloudExtraction = fopen(time_cloudExtraction_path.c_str(), "w");
+        }
 
         allocateMemory();
         resetParameters();
@@ -108,16 +190,33 @@ public:
     {
         laserCloudIn.reset(new pcl::PointCloud<PointXYZIRT>());
         tmpOusterCloudIn.reset(new pcl::PointCloud<OusterPointXYZIRT>());
+        tmpRslidarM1CloudIn.reset(new pcl::PointCloud<RslidarM1PointXYZIRT>);
         fullCloud.reset(new pcl::PointCloud<PointType>());
         extractedCloud.reset(new pcl::PointCloud<PointType>());
 
         fullCloud->points.resize(N_SCAN*Horizon_SCAN);
 
-        cloudInfo.startRingIndex.assign(N_SCAN, 0);
-        cloudInfo.endRingIndex.assign(N_SCAN, 0);
+        cloudInfo.startRingIndex.assign(N_SCAN_EXTENDED, 0);
+        cloudInfo.endRingIndex.assign(N_SCAN_EXTENDED, 0);
 
         cloudInfo.pointColInd.assign(N_SCAN*Horizon_SCAN, 0);
         cloudInfo.pointRange.assign(N_SCAN*Horizon_SCAN, 0);
+
+        std::pair<int8_t, int8_t> neighbor;
+        neighbor.first = -1; neighbor.second =  0; neighborIterator.push_back(neighbor);
+        neighbor.first =  0; neighbor.second =  1; neighborIterator.push_back(neighbor);
+        neighbor.first =  0; neighbor.second = -1; neighborIterator.push_back(neighbor);
+        neighbor.first =  1; neighbor.second =  0; neighborIterator.push_back(neighbor);
+        neighbor.first =  0; neighbor.second =  2; neighborIterator.push_back(neighbor);
+        neighbor.first =  0; neighbor.second =  -2; neighborIterator.push_back(neighbor);
+//        neighbor.first =  2; neighbor.second =  0; neighborIterator.push_back(neighbor);
+//        neighbor.first =  -2; neighbor.second =  0; neighborIterator.push_back(neighbor);
+
+        allPushedIndX = new uint16_t[N_SCAN_EXTENDED*Horizon_SCAN];
+        allPushedIndY = new uint16_t[N_SCAN_EXTENDED*Horizon_SCAN];
+
+        queueIndX = new uint16_t[N_SCAN_EXTENDED*Horizon_SCAN];
+        queueIndY = new uint16_t[N_SCAN_EXTENDED*Horizon_SCAN];
 
         resetParameters();
     }
@@ -127,7 +226,12 @@ public:
         laserCloudIn->clear();
         extractedCloud->clear();
         // reset range matrix for range image projection
-        rangeMat = cv::Mat(N_SCAN, Horizon_SCAN, CV_32F, cv::Scalar::all(FLT_MAX));
+        rangeMat = cv::Mat(N_SCAN_EXTENDED, Horizon_SCAN, CV_32F, cv::Scalar(0));
+        rangeMat_visualization = cv::Mat(N_SCAN_EXTENDED, Horizon_SCAN, CV_8UC1, cv::Scalar(0));
+        // reset label matrix for clustering
+        labelMat = cv::Mat(N_SCAN_EXTENDED, Horizon_SCAN, CV_32S, cv::Scalar(0));
+        labelMat_visualization = cv::Mat(N_SCAN_EXTENDED, Horizon_SCAN, CV_8UC3, cv::Scalar(0,0,0));
+        labelCount = 1;
 
         imuPointerCur = 0;
         firstPointFlag = true;
@@ -141,17 +245,22 @@ public:
             imuRotZ[i] = 0;
         }
 
-        columnIdnCountVec.assign(N_SCAN, 0);
+        columnIdnCountVec.assign(N_SCAN_EXTENDED, 0);
     }
 
     ~ImageProjection(){}
 
     void imuHandler(const sensor_msgs::Imu::ConstPtr& imuMsg)
     {
+        TicToc t_imuHandler;
         sensor_msgs::Imu thisImu = imuConverter(*imuMsg);
 
         std::lock_guard<std::mutex> lock1(imuLock);
         imuQueue.push_back(thisImu);
+
+        if (write_time_log){
+            time_log(fp_time_imuHandler, t_imuHandler.toc());
+        }
 
         // debug IMU data
         // cout << std::setprecision(6);
@@ -173,8 +282,13 @@ public:
 
     void odometryHandler(const nav_msgs::Odometry::ConstPtr& odometryMsg)
     {
+        TicToc t_odometryHandler;
         std::lock_guard<std::mutex> lock2(odoLock);
         odomQueue.push_back(*odometryMsg);
+
+        if (write_time_log){
+            time_log(fp_time_odometryHandler, t_odometryHandler.toc());
+        }
     }
 
     void cloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
@@ -185,17 +299,35 @@ public:
         if (!deskewInfo())
             return;
 
-        projectPointCloud();
+        PointIdToPixel pointId_to_pixel(Horizon_SCAN, N_SCAN);
+        PixelIdToPoint pixelId_to_point(Horizon_SCAN, N_SCAN_EXTENDED);
 
-        cloudExtraction();
+        TicToc t_projectPointCloud;
+        projectPointCloud(pointId_to_pixel, pixelId_to_point);
+
+        if (write_time_log)
+            time_log(fp_time_projectPointCloud, t_projectPointCloud.toc());
+
+        cloudSegmentation(pixelId_to_point);
+
+        labelMat_visualization = LabelsToColor(labelMat);
+
+        publishImages();
+
+        TicToc t_cloudExtraction;
+        cloudExtraction(pixelId_to_point);
+        if (write_time_log)
+            time_log(fp_time_cloudExtraction, t_cloudExtraction.toc());
 
         publishClouds();
 
         resetParameters();
+        numFrame++;
     }
 
     bool cachePointCloud(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
     {
+        TicToc t_cachePointCloud;
         // cache point cloud
         cloudQueue.push_back(*laserCloudMsg);
         if (cloudQueue.size() <= 2)
@@ -225,6 +357,55 @@ public:
                 dst.ring = src.ring;
                 dst.time = src.t * 1e-9f;
             }
+        }
+        else if (sensor == SensorType::RSLIDARM1)
+        {
+            // Convert to Velodyne format
+            pcl::moveFromROSMsg(currentCloudMsg, *tmpRslidarM1CloudIn);
+            laserCloudIn->points.resize(tmpRslidarM1CloudIn->size());
+            laserCloudIn->is_dense = true;
+            double first_point_timestamp = tmpRslidarM1CloudIn->points[0].timestamp;
+            for (size_t i = 0; i < tmpRslidarM1CloudIn->size(); i++)
+            {
+                auto &src = tmpRslidarM1CloudIn->points[i];
+                auto &dst = laserCloudIn->points[i];
+                dst.x = src.x;
+                dst.y = src.y;
+                dst.z = src.z;
+                dst.intensity = src.intensity;
+                dst.ring = src.ring;
+                dst.time = src.timestamp - first_point_timestamp;
+            }
+
+/*
+            double first_point_timestamp = tmpRslidarM1CloudIn->at(0,0).timestamp;
+            std::vector<pcl::PointCloud<PointXYZIRT>> pointcloud_subcloud_channel(5);
+            for (size_t i_row = 0; i_row < tmpRslidarM1CloudIn->width; ++i_row)
+            {
+                for (size_t i_column = 0; i_column < tmpRslidarM1CloudIn->height; ++i_column)
+                {
+                    PointXYZIRT added_pt;
+                    added_pt.x = tmpRslidarM1CloudIn->at(i_row, i_column).x;
+                    added_pt.y = tmpRslidarM1CloudIn->at(i_row, i_column).y;
+                    added_pt.z = tmpRslidarM1CloudIn->at(i_row, i_column).z;
+                    added_pt.intensity = tmpRslidarM1CloudIn->at(i_row, i_column).intensity;
+                    added_pt.ring = i_row;//i_column % 5;
+                    added_pt.time = tmpRslidarM1CloudIn->at(i_row, i_column).timestamp - first_point_timestamp;
+                    pointcloud_subcloud_channel[i_row].push_back(added_pt);
+                }
+            }
+            for (int i_subcloud = 0; i_subcloud < 5; ++i_subcloud)
+            {
+                for (size_t i = 0; i < pointcloud_subcloud_channel[i_subcloud].size(); ++i)
+                {
+                    float pt_x = pointcloud_subcloud_channel[i_subcloud].points[i].x;
+                    float pt_y = pointcloud_subcloud_channel[i_subcloud].points[i].y;
+                    float pt_z = pointcloud_subcloud_channel[i_subcloud].points[i].z;
+                    if (pt_x * pt_x + pt_y * pt_y + pt_z * pt_z < 200 * 200)
+                        laserCloudIn->push_back(pointcloud_subcloud_channel[i_subcloud].points[i]);
+                }
+            }
+*/
         }
         else
         {
@@ -270,7 +451,7 @@ public:
             deskewFlag = -1;
             for (auto &field : currentCloudMsg.fields)
             {
-                if (field.name == "time" || field.name == "t")
+                if (field.name == "time" || field.name == "t" || field.name == "timestamp")
                 {
                     deskewFlag = 1;
                     break;
@@ -278,6 +459,10 @@ public:
             }
             if (deskewFlag == -1)
                 ROS_WARN("Point cloud timestamp not available, deskew function disabled, system will drift significantly!");
+        }
+
+        if (write_time_log){
+            time_log(fp_time_cachePointCloud, t_cachePointCloud.toc());
         }
 
         return true;
@@ -295,9 +480,17 @@ public:
             return false;
         }
 
+        TicToc t_imuDeskewInfo;
         imuDeskewInfo();
+        if (write_time_log){
+            time_log(fp_time_imuDeskewInfo, t_imuDeskewInfo.toc());
+        }
 
+        TicToc t_odomDeskewInfo;
         odomDeskewInfo();
+        if (write_time_log){
+            time_log(fp_time_odomDeskewInfo, t_odomDeskewInfo.toc());
+        }
 
         return true;
     }
@@ -364,10 +557,10 @@ public:
     void odomDeskewInfo()
     {
         cloudInfo.odomAvailable = false;
-
+        static float sync_diff_time = (imuRate >= 300) ? 0.01 : 0.20;
         while (!odomQueue.empty())
         {
-            if (odomQueue.front().header.stamp.toSec() < timeScanCur - 0.01)
+            if (odomQueue.front().header.stamp.toSec() < timeScanCur - sync_diff_time)
                 odomQueue.pop_front();
             else
                 break;
@@ -379,7 +572,7 @@ public:
         if (odomQueue.front().header.stamp.toSec() > timeScanCur)
             return;
 
-        // get start odometry at the beinning of the scan
+        // get start odometry at the beginning of the scan
         nav_msgs::Odometry startOdomMsg;
 
         for (int i = 0; i < (int)odomQueue.size(); ++i)
@@ -518,8 +711,13 @@ public:
         return newPoint;
     }
 
-    void projectPointCloud()
+    void projectPointCloud(PointIdToPixel& pointId_to_pixel, PixelIdToPoint& pixelId_to_point)
     {
+        float ang_bottom = bottom_angle;
+        float ang_left = left_angle;
+        float ang_res_y = resolution_y;
+        float ang_res_x = resolution_x;
+
         int cloudSize = laserCloudIn->points.size();
         // range image projection
         for (int i = 0; i < cloudSize; ++i)
@@ -534,8 +732,18 @@ public:
             if (range < lidarMinRange || range > lidarMaxRange)
                 continue;
 
-            int rowIdn = laserCloudIn->points[i].ring;
-            if (rowIdn < 0 || rowIdn >= N_SCAN)
+            float verticalAngle = atan2(thisPoint.z, sqrt(thisPoint.x * thisPoint.x + thisPoint.y * thisPoint.y)) * 180 / M_PI;
+            float horizonAngle = atan2(thisPoint.x, thisPoint.y) * 180 / M_PI;
+
+            int rowIdn;
+            if (use_ring_channel){
+                rowIdn = laserCloudIn->points[i].ring;
+            } else{
+                rowIdn = (verticalAngle - ang_bottom) / ang_res_y;
+                rowIdn = N_SCAN_EXTENDED - rowIdn; // pixel start from the top
+            }
+
+            if (rowIdn < 0 || rowIdn >= N_SCAN_EXTENDED)
                 continue;
 
             if (rowIdn % downsampleRate != 0)
@@ -550,51 +758,306 @@ public:
                 if (columnIdn >= Horizon_SCAN)
                     columnIdn -= Horizon_SCAN;
             }
-            else if (sensor == SensorType::LIVOX)
+            else if (sensor == SensorType::LIVOX || sensor == SensorType::RSLIDARM1)
             {
-                columnIdn = columnIdnCountVec[rowIdn];
+//                columnIdn = columnIdnCountVec[rowIdn];
+                columnIdn = (horizonAngle - ang_left) / ang_res_x;
                 columnIdnCountVec[rowIdn] += 1;
+            }
+
+            if (columnIdn >= Horizon_SCAN) {
+                columnIdn -= Horizon_SCAN;
             }
             
             if (columnIdn < 0 || columnIdn >= Horizon_SCAN)
                 continue;
 
-            if (rangeMat.at<float>(rowIdn, columnIdn) != FLT_MAX)
+            if (rangeMat.at<float>(rowIdn, columnIdn) != 0)
                 continue;
 
-            thisPoint = deskewPoint(&thisPoint, laserCloudIn->points[i].time);
+            if (imuDeskewPoint)
+            {
+                TicToc t_deskewPoint;
+                thisPoint = deskewPoint(&thisPoint, laserCloudIn->points[i].time);
+                if (write_time_log){
+                    time_log(fp_time_deskewPoint, t_deskewPoint.toc());
+                }
+            }
+
+            // 存放每个投影点在rangeImage上的像素id: columnId, rowId
+            pair<int, int> range_image_pixel_id;
+            range_image_pixel_id.first = columnIdn;
+            range_image_pixel_id.second = rowIdn;
+            pointId_to_pixel.pixel_vec_[i] = range_image_pixel_id;
+
+            // 存放rangeImage上每个像素对应的多个投影点的id
+            float point_id = i;
+            pair<float, int> point_cloud_point_range_id;
+            point_cloud_point_range_id.first = range;
+            point_cloud_point_range_id.second = point_id;
+            pixelId_to_point.point_vec_[columnIdn + rowIdn * Horizon_SCAN].insert(point_cloud_point_range_id);
 
             rangeMat.at<float>(rowIdn, columnIdn) = range;
+            rangeMat_visualization.at<uint8_t>(rowIdn, columnIdn) = std::max(float(255 * (1- range / lidarMaxRange)), 0.0f);
 
-            int index = columnIdn + rowIdn * Horizon_SCAN;
-            fullCloud->points[index] = thisPoint;
+            /*int index = columnIdn + rowIdn * Horizon_SCAN;*/
+            int index = i;
+            fullCloud->points[index] = thisPoint; // save deskewed point
+        }
+
+        complementRangeImage(pixelId_to_point);
+
+        for (int i = 0; i < N_SCAN_EXTENDED; ++i) {
+            for (int j = 0; j < Horizon_SCAN; ++j) {
+                if (rangeMat.at<float>(i,j) == 0)
+                    labelMat.at<int>(i,j) = -1;
+            }
         }
     }
 
-    void cloudExtraction()
+    void complementRangeImage(PixelIdToPoint &pixelId_to_point)
+    {
+        // rangeImage每个像素取set中最小的range(遮挡原因，最小range在最前面)
+        for (int rowIdn = 0; rowIdn < rangeMat.rows; rowIdn++){
+            for (int columnIdn = 0; columnIdn < rangeMat.cols; columnIdn++){
+                if (rangeMat.at<float>(rowIdn, columnIdn) != 0 && pixelId_to_point.point_vec_[columnIdn + rowIdn * Horizon_SCAN].size() > 1){
+                    pair<int, int> p_pixel_id(columnIdn, rowIdn);
+                    rangeMat.at<float>(rowIdn, columnIdn) = pixelId_to_point.toFindPointIdAndRange(p_pixel_id).begin()->first;
+                    rangeMat_visualization.at<uint8_t>(rowIdn, columnIdn) = std::max(float(255 * (1- pixelId_to_point.toFindPointIdAndRange(p_pixel_id).begin()->first / lidarMaxRange)), 0.0f);
+                }
+            }
+        }
+
+        cv::Mat rangeMat_copy = rangeMat.clone();
+        cv::Mat rangeMat_visualization_copy = rangeMat_visualization.clone();
+
+        //look up table to complete holes in image, find neighboor valid pixels and use their average if there are enough valid neighboors
+        int ary_look_table_y[8]={-1,-1,-1,0,0,1,1,1};
+        int ary_look_table_x[8]={-1,0,1,-1,1,-1,0,1};
+        //wider search
+        /*int ary_look_table_y[24]={-1,-1,-1,0,0,1,1,1,-2,-2,-2,-2,-2,-1,-1,0,0,1,1,2,2,2,2,2};
+        int ary_look_table_x[24]={-1,0,1,-1,1,-1,0,1,-2,-1,0,1,2,-2,2,-2,2,-2,2,-2,-1,0,1,2};*/
+        for (int rowIdn = 2; rowIdn < rangeMat.rows-2; rowIdn++){
+            for (int columnIdn = 2; columnIdn < rangeMat.cols-2; columnIdn++){
+                if(rangeMat.at<float>(rowIdn, columnIdn) == 0){
+                    double valid_neighboor_range = 0;
+                    int valid_neighboor_count = 0;
+                    for(int look_step = 0; look_step < 8; look_step ++){
+                        if(rangeMat_copy.at<float>(rowIdn + ary_look_table_y[look_step], columnIdn + ary_look_table_x[look_step]) != 0){
+                            valid_neighboor_count ++;
+                            valid_neighboor_range += rangeMat_copy.at<float>(rowIdn + ary_look_table_y[look_step], columnIdn + ary_look_table_x[look_step]);
+                        }
+                        if(valid_neighboor_count > 3){
+//                            image_range_project.at<uint8_t>(rowIdn, columnIdn) = valid_neighboor_range / (1.0 * valid_neighboor_count);
+                            rangeMat.at<float>(rowIdn, columnIdn) = rangeMat_copy.at<float>(rowIdn + ary_look_table_y[look_step], columnIdn + ary_look_table_x[look_step]);
+                            rangeMat_visualization.at<uint8_t>(rowIdn, columnIdn) = rangeMat_visualization_copy.at<uint8_t>(rowIdn + ary_look_table_y[look_step], columnIdn + ary_look_table_x[look_step]);
+                            // 空的像素用其他像素补全了，那么这个空的像素对应点的索引就和补全它的像素对应点的索引保持一致
+                            pair<int, int> pixel_completion_id(columnIdn + ary_look_table_x[look_step], rowIdn + ary_look_table_y[look_step]);
+                            pair<float, int> point_completion_range_pointid;
+                            point_completion_range_pointid.first = pixelId_to_point.toFindPointIdAndRange(pixel_completion_id).begin()->first;
+                            point_completion_range_pointid.second = pixelId_to_point.toFindPointIdAndRange(pixel_completion_id).begin()->second;
+                            pixelId_to_point.point_vec_[columnIdn + rowIdn * Horizon_SCAN].insert(point_completion_range_pointid);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // smooth range image
+        /*cv::GaussianBlur(rangeMat, rangeMat, cv::Size(3, 3), 0, 0);
+        cv::medianBlur(rangeMat, rangeMat, 3);
+        cv::blur(rangeMat, rangeMat, cv::Size(5,5));*/
+    }
+
+    void cloudSegmentation(PixelIdToPoint& pixelId_to_point) {
+        // segmentation process
+        for (int i = 0; i < N_SCAN_EXTENDED; ++i) {
+            for (int j = 0; j < Horizon_SCAN; ++j) {
+                if (labelMat.at<int>(i, j) == 0)
+                    labelComponents(i, j, pixelId_to_point);
+            }
+        }
+    }
+
+    void labelComponents(int row, int col, PixelIdToPoint& pixelId_to_point){
+        float d_origin, d_nei, d_diff, d_max;
+        float d1, d2, alpha, angle;
+        int fromIndX, fromIndY, thisIndX, thisIndY;
+        bool lineCountFlag[130] = {false};
+
+        queueIndX[0] = row;
+        queueIndY[0] = col;
+        int queueSize = 1;
+        int queueStartInd = 0;
+        int queueEndInd = 1;
+
+        allPushedIndX[0] = row;
+        allPushedIndY[0] = col;
+        int allPushedIndSize = 1;
+
+        // BFS
+        while(queueSize > 0){
+            // Pop point
+            fromIndX = queueIndX[queueStartInd];
+            fromIndY = queueIndY[queueStartInd];
+            --queueSize;
+            ++queueStartInd;
+            // Mark popped point
+            labelMat.at<int>(fromIndX, fromIndY) = labelCount;
+
+            // Loop through all the neighboring grids of popped grid
+            // neighbor=[[-1,0];[0,1];[0,-1];[1,0]]
+            for (auto iter = neighborIterator.begin(); iter != neighborIterator.end(); ++iter){
+                // new index
+                thisIndX = fromIndX + (*iter).first;
+                thisIndY = fromIndY + (*iter).second;
+                // index should be within the boundary
+                if (thisIndX < 0 || thisIndX >= N_SCAN_EXTENDED)
+                    continue;
+                // at range image margin (left or right side)
+                if (thisIndY < 0)
+                    thisIndY = Horizon_SCAN - 1;
+                if (thisIndY >= Horizon_SCAN)
+                    thisIndY = 0;
+
+                // prevent infinite loop (caused by put already examined point back)
+                if (labelMat.at<int>(thisIndX, thisIndY) != 0)
+                    continue;
+
+                d_origin = rangeMat.at<float>(fromIndX, fromIndY);
+                d_nei = rangeMat.at<float>(thisIndX, thisIndY);
+                d_diff = fabs(d_origin - d_nei);
+                d1 = std::max(rangeMat.at<float>(fromIndX, fromIndY),
+                              rangeMat.at<float>(thisIndX, thisIndY));
+                d2 = std::min(rangeMat.at<float>(fromIndX, fromIndY),
+                              rangeMat.at<float>(thisIndX, thisIndY));
+
+                if ((*iter).first == 0){
+                    d_max = (d_origin) * sin(segmentAlphaX)/sin(25*M_PI/180 - segmentAlphaX) + 3*0.15; // 0.1
+                    alpha = segmentAlphaX;
+                }
+                else{
+                    d_max = (d_origin) * sin(segmentAlphaY)/sin(6*M_PI/180 -segmentAlphaY) + 0.5; // 0.5
+                    alpha = segmentAlphaY;
+                }
+
+//                d_dist = sqrt(d_origin * d_origin + d_nei * d_nei - 2 * d_origin * d_nei * cos(alpha));
+                angle = atan2(d2*sin(alpha), (d1 -d2*cos(alpha)));
+
+//                if (d_diff < d_max && angle > segmentTheta){
+                if (angle > segmentTheta){
+//                if (horizontal_smoothness.at<float>(thisIndX, thisIndY) < segmentThreshold_horizontal_smoothness_min){
+//                if (vertical_smoothness.at<float>(thisIndX, thisIndY) < segmentThreshold_vertical_smoothness_min){
+//                if (surronding_smoothness.at<float>(thisIndX, thisIndY) < segmentThreshold_surronding_smoothness_min){
+//                if (d_dist < 0.8){
+//                if (angle > segmentTheta && d_dist < 0.8){
+//                if (d_diff < d_max){
+                    queueIndX[queueEndInd] = thisIndX;
+                    queueIndY[queueEndInd] = thisIndY;
+                    ++queueSize;
+                    ++queueEndInd;
+
+                    labelMat.at<int>(thisIndX, thisIndY) = labelCount;
+                    lineCountFlag[thisIndX] = true;
+
+                    allPushedIndX[allPushedIndSize] = thisIndX;
+                    allPushedIndY[allPushedIndSize] = thisIndY;
+                    ++allPushedIndSize;
+                }
+            }
+        }
+
+        // check if this segment is valid
+        bool feasibleSegment = false;
+
+        if (allPushedIndSize >= segmentMinPointNum) // default: 30
+            feasibleSegment = true;
+        else if (allPushedIndSize >= segmentValidPointNum){
+            int lineCount = 0;
+            for (int i = 0; i < N_SCAN_EXTENDED; ++i)
+                if (lineCountFlag[i])
+                    ++lineCount;
+            if (lineCount >= segmentValidLineNum)
+                feasibleSegment = true;
+        }
+        // segment is valid, mark these points
+        if (feasibleSegment){
+            ++labelCount;
+        }else{ // segment is invalid, mark these points
+            for (int i = 0; i < allPushedIndSize; ++i){
+                labelMat.at<int>(allPushedIndX[i], allPushedIndY[i]) = 999999;
+            }
+        }
+    }
+
+    cv::Mat LabelsToColor(const cv::Mat& label_image) {
+        cv::Mat color_image(label_image.size(), CV_8UC3, cv::Scalar(0, 0, 0));
+
+        for (int row = 0; row < label_image.rows; ++row) {
+            for (int col = 0; col < label_image.cols; ++col) {
+                if (label_image.at<int>(row, col) > 0 && label_image.at<int>(row, col) != 999999){
+                    auto label = label_image.at<int>(row, col);
+                    auto random_color = RANDOM_COLORS[label % RANDOM_COLORS.size()];
+                    cv::Vec3b color = cv::Vec3b(random_color[0], random_color[1], random_color[2]);
+                    color_image.at<cv::Vec3b>(row, col) = color;
+                }
+            }
+        }
+        return color_image;
+    }
+
+    void pubImages(ros::Publisher *this_pub, const cv::Mat& this_image, std_msgs::Header this_header, string image_format)
+    {
+        static cv_bridge::CvImage bridge;
+        bridge.header = this_header;
+        bridge.encoding = image_format;
+        bridge.image = this_image;
+        this_pub->publish(bridge.toImageMsg());
+    }
+
+    void publishImages(){
+        cv::Mat image_visualization;
+        image_visualization = rangeMat_visualization;
+        cv::cvtColor(image_visualization, image_visualization, CV_GRAY2RGB);
+        cv::vconcat(image_visualization, labelMat_visualization, image_visualization);
+
+        cv::putText(image_visualization, "Range_projected",   cv::Point2f(5, 20 + N_SCAN*0), CV_FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255,0,255), 2);
+        cv::putText(image_visualization, "Label_color",   cv::Point2f(5, 20 + N_SCAN_EXTENDED*1), CV_FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255,0,255), 2);
+        pubImages(&pubImage, image_visualization, cloudHeader, "bgr8");
+    }
+
+    void cloudExtraction(PixelIdToPoint &pixelId_to_point)
     {
         int count = 0;
         // extract segmented cloud for lidar odometry
-        for (int i = 0; i < N_SCAN; ++i)
+        for (int i = 0; i < N_SCAN_EXTENDED; ++i)
         {
             cloudInfo.startRingIndex[i] = count - 1 + 5;
 
             for (int j = 0; j < Horizon_SCAN; ++j)
             {
-                if (rangeMat.at<float>(i,j) != FLT_MAX)
+                if (rangeMat.at<float>(i,j) != 0) // points exist
                 {
                     // mark the points' column index for marking occlusion later
                     cloudInfo.pointColInd[count] = j;
+
                     // save range info
-                    cloudInfo.pointRange[count] = rangeMat.at<float>(i,j);
+                    pair<int, int> pixel_id(j, i);
+                    cloudInfo.pointRange[count] = pixelId_to_point.toFindPointIdAndRange(pixel_id).begin()->first;
+                    /*cloudInfo.pointRange[count] = rangeMat.at<float>(i,j);*/
+
                     // save extracted cloud
-                    extractedCloud->push_back(fullCloud->points[j + i*Horizon_SCAN]);
+                    extractedCloud->push_back(fullCloud->points[pixelId_to_point.toFindPointIdAndRange(pixel_id).begin()->second]);
+                    /*extractedCloud->push_back(fullCloud->points[j + i*Horizon_SCAN]);*/
+
                     // size of extracted cloud
                     ++count;
                 }
             }
             cloudInfo.endRingIndex[i] = count -1 - 5;
         }
+//        std::cout << extractedCloud->size() << std::endl;
     }
     
     void publishClouds()
